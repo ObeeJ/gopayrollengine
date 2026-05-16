@@ -6,7 +6,7 @@
 
 <div align="center">
 
-[![CI](https://github.com/obeej/go-payroll-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/obeej/go-payroll-engine/actions)&nbsp;
+[![CI](https://github.com/ObeeJ/gopayrollengine/actions/workflows/ci.yml/badge.svg)](https://github.com/ObeeJ/gopayrollengine/actions)&nbsp;
 ![Go](https://img.shields.io/badge/Go_1.22+-00ADD8?style=flat-square&logo=go&logoColor=white)&nbsp;
 ![Postgres](https://img.shields.io/badge/PostgreSQL_15-4169E1?style=flat-square&logo=postgresql&logoColor=white)&nbsp;
 ![Redis](https://img.shields.io/badge/Redis_7-DC382D?style=flat-square&logo=redis&logoColor=white)&nbsp;
@@ -283,7 +283,7 @@ docker-compose up
 
 ```bash
 # Clone
-git clone https://github.com/obeej/go-payroll-engine.git
+git clone https://github.com/ObeeJ/gopayrollengine.git
 cd go-payroll-engine
 
 # Configure

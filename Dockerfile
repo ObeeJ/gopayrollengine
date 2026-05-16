@@ -1,15 +1,15 @@
 # Build stage
-FROM golang:1.22-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
 
 RUN apk add --no-cache gcc musl-dev
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN GOTOOLCHAIN=auto go mod download
 
 COPY . .
-RUN go build -o /app/payroll-app cmd/api/main.go
+RUN GOTOOLCHAIN=auto go build -o /app/payroll-app cmd/api/main.go
 
 # Final stage — pinned alpine version for reproducible builds
 FROM alpine:3.20

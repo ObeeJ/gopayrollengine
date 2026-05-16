@@ -3,6 +3,7 @@ package handlers
 import (
 	"go-payroll-engine/internal/api/middleware"
 	"go-payroll-engine/internal/models"
+	"go-payroll-engine/internal/repository"
 	"go-payroll-engine/internal/services"
 	"net/http"
 	"strconv"
@@ -11,9 +12,18 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type EmployeeHandler struct{}
+type EmployeeHandler struct {
+	repo   repository.EmployeeRepository
+	bvnSvc *services.BVNService
+}
 
-// CreateEmployee — adds a new employee; BVN is verified and consent is recorded before DB insert.
+// NewEmployeeHandler — wires up the handler with its repository and BVN service.
+func NewEmployeeHandler(r repository.EmployeeRepository, b *services.BVNService) *EmployeeHandler {
+	return &EmployeeHandler{repo: r, bvnSvc: b}
+}
+
+// CreateEmployee — creates an employee; BVN verified, consent recorded, PII encrypted.
+// Only admin role can create employees — viewers are read-only.
 func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 	var req struct {
 		Name          string  `json:"name" binding:"required"`
@@ -21,7 +31,7 @@ func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 		AccountNumber string  `json:"account_number" binding:"required"`
 		BankCode      string  `json:"bank_code" binding:"required"`
 		Salary        float64 `json:"salary" binding:"required"`
-		BVN           string  `json:"bvn" binding:"required"` // required for CBN KYC compliance
+		BVN           string  `json:"bvn" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -29,7 +39,6 @@ func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 	}
 
 	orgID := middleware.OrgID(c)
-
 	emp := models.Employee{
 		OrganizationID: orgID,
 		Name:           req.Name,
@@ -39,23 +48,16 @@ func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 		Salary:         req.Salary,
 	}
 
-	if err := models.DB.Create(&emp).Error; err != nil {
+	if err := h.repo.Create(&emp); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create employee"})
 		return
 	}
 
-	// BVN verification — runs after DB insert so we have an employee ID to attach it to.
-	bvnSvc := services.NewBVNService()
-	if _, err := bvnSvc.VerifyBVN(orgID, emp.ID, req.BVN); err != nil {
-		// Log the failure but don't block the response — verification can be retried.
-		middleware.Logger.Warn("BVN verification failed",
-			"employee_id", emp.ID,
-			"error", err.Error(),
-		)
+	if _, err := h.bvnSvc.VerifyBVN(orgID, emp.ID, req.BVN); err != nil {
+		middleware.Logger.Warn("BVN verification failed", "employee_id", emp.ID, "error", err.Error())
 	}
 
-	// Auto-record payroll processing consent at creation — NDPR baseline requirement.
-	expires := time.Now().AddDate(1, 0, 0) // consent expires in 1 year; must be renewed
+	expires := time.Now().AddDate(1, 0, 0)
 	models.DB.Create(&models.ConsentRecord{
 		OrganizationID: orgID,
 		EmployeeID:     emp.ID,
@@ -71,7 +73,8 @@ func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 	c.JSON(http.StatusCreated, emp)
 }
 
-// GetEmployees — paginated list scoped to the caller's org; OFFSET is fine until 100k rows.
+// GetEmployees — paginated list scoped to the caller's org.
+// Both admin and viewer roles can read.
 func (h *EmployeeHandler) GetEmployees(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
@@ -82,11 +85,11 @@ func (h *EmployeeHandler) GetEmployees(c *gin.Context) {
 		pageSize = 20
 	}
 
-	var total int64
-	models.ScopedDB(middleware.OrgID(c)).Model(&models.Employee{}).Count(&total)
-
-	var employees []models.Employee
-	models.ScopedDB(middleware.OrgID(c)).Offset((page - 1) * pageSize).Limit(pageSize).Find(&employees)
+	employees, total, err := h.repo.ListPaginated(middleware.OrgID(c), page, pageSize)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list employees"})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"data": employees, "page": page, "page_size": pageSize, "total": total,

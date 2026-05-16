@@ -13,10 +13,13 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// Claims — the payload we embed in every JWT; org_id is the multi-tenancy anchor.
+// Claims — the payload embedded in every JWT.
+// OrgID is set for employer tokens. EmployeeID is set for worker tokens.
+// They are mutually exclusive — a token is either an employer or a worker, never both.
 type Claims struct {
-	OrgID string `json:"org_id"`
-	Role  string `json:"role"` // "admin" | "viewer" — RBAC starts here
+	OrgID      string `json:"org_id"`
+	EmployeeID string `json:"employee_id"` // set only on worker tokens
+	Role       string `json:"role"`        // "admin" | "viewer" | "compliance" | "employee"
 	jwt.RegisteredClaims
 }
 
@@ -36,11 +39,26 @@ func InitJWT() {
 	jwtSecret = []byte(secret)
 }
 
-// IssueToken — mints a signed JWT for an org; call this from your login/auth endpoint.
+// IssueToken — mints a signed JWT for an employer org.
 func IssueToken(orgID, role string, ttl time.Duration) (string, error) {
 	claims := Claims{
 		OrgID: orgID,
 		Role:  role,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(jwtSecret)
+}
+
+// IssueWorkerToken — mints a signed JWT for a worker (employee app user).
+// EmployeeID is embedded so every query can be scoped to that specific worker.
+func IssueWorkerToken(orgID, employeeID string, ttl time.Duration) (string, error) {
+	claims := Claims{
+		OrgID:      orgID,
+		EmployeeID: employeeID,
+		Role:       "employee",
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -77,8 +95,9 @@ func JWTAuth() gin.HandlerFunc {
 			return
 		}
 
-		// Inject claims into context — downstream handlers use OrgID(c) and Role(c).
+		// Inject claims into context — downstream handlers use OrgID(c), EmployeeID(c), Role(c).
 		c.Set(OrgIDKey, claims.OrgID)
+		c.Set("employee_id", claims.EmployeeID)
 		c.Set("role", claims.Role)
 		c.Next()
 	}
@@ -120,4 +139,43 @@ func Role(c *gin.Context) string {
 	v, _ := c.Get("role")
 	r, _ := v.(string)
 	return r
+}
+
+// EmployeeID — pulls the employee_id from context; only set on worker tokens.
+// Empty string means the caller is an employer, not a worker.
+func EmployeeID(c *gin.Context) string {
+	v, _ := c.Get("employee_id")
+	id, _ := v.(string)
+	return id
+}
+
+// RequireWorker — gate that only allows worker (employee) tokens through.
+// Prevents employers from hitting worker-only endpoints.
+func RequireWorker() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if Role(c) != "employee" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "this endpoint is for workers only"})
+			c.Abort()
+			return
+		}
+		if EmployeeID(c) == "" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "worker identity missing from token"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+// RequireEmployer — gate that only allows employer (admin/viewer/compliance) tokens through.
+// Prevents workers from hitting employer-only endpoints.
+func RequireEmployer() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if Role(c) == "employee" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "this endpoint is for employers only"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
 }

@@ -44,7 +44,7 @@ func (r *responseRecorder) WriteHeader(status int) {
 // Idempotency is a Gin middleware that enforces idempotency on mutating endpoints.
 //
 // DSA: Hash Map in Redis. Key = "idempotency:{Idempotency-Key}", Value = cached response.
-// O(1) Redis GET before any business logic. On a cache hit the original response is
+// O(1) Redis GET — cache hit replays the original response immediately,
 // replayed immediately — no DB touched, no double payment possible.
 //
 // Clients must send a unique "Idempotency-Key" header (UUID recommended).

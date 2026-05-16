@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"go-payroll-engine/internal/api/middleware"
-	"go-payroll-engine/internal/models"
+	"go-payroll-engine/internal/repository"
 	"net/http"
 	"time"
 
@@ -10,10 +10,11 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-type AuthHandler struct{}
+type AuthHandler struct {
+	OrgRepo repository.OrganizationRepository
+}
 
-// Login handles POST /api/v1/auth/login.
-// Validates org credentials and returns a signed JWT — the key to the kingdom, time-limited.
+// Login handles POST /api/v1/auth/login — validates org credentials, issues employer JWT.
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req struct {
 		OrgID    string `json:"org_id" binding:"required"`
@@ -24,8 +25,8 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	var org models.Organization
-	if err := models.DB.First(&org, "id = ?", req.OrgID).Error; err != nil {
+	org, err := h.OrgRepo.FindByID(req.OrgID)
+	if err != nil {
 		// Same error for wrong ID or wrong password — no oracle for attackers.
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
@@ -36,7 +37,6 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	// 8-hour token — long enough for a workday, short enough to limit blast radius.
 	token, err := middleware.IssueToken(org.ID, org.Role, 8*time.Hour)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not issue token"})
@@ -47,11 +47,11 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		"token":      token,
 		"expires_in": "8h",
 		"org_id":     org.ID,
+		"role":       org.Role,
 	})
 }
 
-// RefreshToken handles POST /api/v1/auth/refresh.
-// Issues a fresh token from a still-valid one — no password re-entry needed within the window.
+// RefreshToken handles POST /api/v1/auth/refresh — renews a valid employer token.
 func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	orgID := middleware.OrgID(c)
 	role := middleware.Role(c)

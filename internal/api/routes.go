@@ -4,6 +4,7 @@ import (
 	"go-payroll-engine/internal/api/handlers"
 	"go-payroll-engine/internal/api/middleware"
 	"go-payroll-engine/internal/models"
+	"go-payroll-engine/internal/repository"
 	"go-payroll-engine/internal/services"
 	"go-payroll-engine/internal/workers"
 
@@ -11,84 +12,108 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// SetupRouter — the front door; everything that enters the building goes through this lobby.
+// SetupRouter — composition root; repositories are born here and injected everywhere else.
 func SetupRouter() *gin.Engine {
-	r := gin.New() // gin.New() not gin.Default() — we choose our own middleware adventure.
+	r := gin.New()
 
-	// Global stack (order matters): security → body limit → logging → metrics → throttle → recovery.
+	// Global stack — order is load-bearing: security before logging, logging before throttle.
 	r.Use(middleware.SecurityHeaders())
 	r.Use(middleware.BodySizeLimit())
 	r.Use(middleware.RequestLogger())
-	r.Use(middleware.PrometheusMiddleware()) // must run after RequestLogger so request_id is set
+	r.Use(middleware.PrometheusMiddleware())
 	r.Use(middleware.RateLimit())
 	r.Use(gin.Recovery())
 
-	// Bloom filter: 100k bits, 7 hashes → ~1% false positive rate, ~12 KB Redis memory.
+	// Bloom filter: 100k bits, 7 hashes, ~1% FP rate, ~12 KB Redis.
 	middleware.WebhookBloom = middleware.NewBloomFilter(workers.RDB, "bloom:webhooks", 100_000, 7)
 
-	// /metrics — Prometheus scrape endpoint; restrict to internal network in production.
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
-	// Health probes — no auth, no tenant scope; just "are you alive?" and "are you ready?".
 	healthHandler := &handlers.HealthHandler{DB: models.DB, RDB: workers.RDB}
 	r.GET("/healthz", healthHandler.Liveness)
 	r.GET("/readyz", healthHandler.Readiness)
 
-	authHandler := &handlers.AuthHandler{}
-	empHandler := &handlers.EmployeeHandler{}
-	payrollHandler := &handlers.PayrollHandler{Service: &services.PayrollService{}}
-	analyticsHandler := &handlers.AnalyticsHandler{Service: services.NewAnalyticsService()}
-	webhookHandler := &handlers.WebhookHandler{}
-	consentHandler := &handlers.ConsentHandler{}
+	// Repositories — one instance each, injected down the chain.
+	empRepo     := repository.NewEmployeeRepository(models.DB)
+	payrollRepo := repository.NewPayrollRepository(models.DB)
+	orgRepo     := repository.NewOrganizationRepository(models.DB)
+	userRepo    := repository.NewUserRepository(models.DB)
+	bvnSvc      := services.NewBVNService()
+
+	// Handlers — dependencies injected, no handler touches models.DB directly.
+	authHandler       := &handlers.AuthHandler{OrgRepo: orgRepo}
+	workerAuthHandler := handlers.NewWorkerAuthHandler(userRepo, empRepo)
+	empHandler        := handlers.NewEmployeeHandler(empRepo, bvnSvc)
+	payrollHandler    := &handlers.PayrollHandler{Service: services.NewPayrollService(payrollRepo, empRepo)}
+	analyticsHandler  := &handlers.AnalyticsHandler{Service: services.NewAnalyticsService(payrollRepo, empRepo)}
+	advanceHandler    := handlers.NewAdvanceHandler(empRepo)
+	webhookHandler    := &handlers.WebhookHandler{}
+	consentHandler    := &handlers.ConsentHandler{}
 	complianceHandler := &handlers.ComplianceHandler{}
 
 	v1 := r.Group("/api/v1")
 	{
-		// Auth — public; issues the JWT that unlocks everything else.
+		// Public auth — employer login + token refresh.
 		auth := v1.Group("/auth")
 		{
 			auth.POST("/login", authHandler.Login)
 			auth.POST("/refresh", middleware.JWTAuth(), authHandler.RefreshToken)
 		}
 
-		// Webhook is public — Monnify doesn't send a JWT, it sends an HMAC signature.
+		// Worker auth — OTP login, issues employee-scoped JWT.
+		workerAuth := v1.Group("/worker/auth")
+		{
+			workerAuth.POST("/login", workerAuthHandler.WorkerLogin)
+		}
+
+		// Monnify webhook — HMAC-verified, no JWT needed.
 		v1.POST("/webhooks/monnify", webhookHandler.HandleMonnifyWebhook)
 
-		// Protected: JWT → tenant identity → data residency → business logic.
-		protected := v1.Group("/")
-		protected.Use(middleware.JWTAuth())
-		protected.Use(middleware.TenantMiddleware())
-		protected.Use(middleware.DataResidency()) // rejects cross-region requests after org is loaded
+		// Employer routes — JWT → tenant → residency → employer gate → role gate.
+		employer := v1.Group("/")
+		employer.Use(middleware.JWTAuth())
+		employer.Use(middleware.TenantMiddleware())
+		employer.Use(middleware.DataResidency())
+		employer.Use(middleware.RequireEmployer())
 		{
-			employees := protected.Group("/employees")
+			employees := employer.Group("/employees")
 			{
-				employees.POST("/", middleware.Idempotency(workers.RDB), empHandler.CreateEmployee)
+				employees.POST("/", middleware.RequireRole("admin"), middleware.Idempotency(workers.RDB), empHandler.CreateEmployee)
 				employees.GET("/", empHandler.GetEmployees)
 			}
 
-			payrolls := protected.Group("/payrolls")
+			payrolls := employer.Group("/payrolls")
 			{
-				payrolls.POST("/", middleware.Idempotency(workers.RDB), payrollHandler.CreatePayroll)
+				payrolls.POST("/", middleware.RequireRole("admin"), middleware.Idempotency(workers.RDB), payrollHandler.CreatePayroll)
 				payrolls.GET("/:id", payrollHandler.GetPayroll)
 			}
 
-			analytics := protected.Group("/analytics")
+			analytics := employer.Group("/analytics")
 			{
 				analytics.GET("/predictive", analyticsHandler.GetPredictiveAnalytics)
 			}
 
-			consent := protected.Group("/consent")
+			consent := employer.Group("/consent")
 			{
 				consent.POST("/", consentHandler.RecordConsent)
 				consent.GET("/:employee_id", consentHandler.GetConsent)
 			}
 
-			// Compliance report — role-gated; only compliance officers can pull this.
-			compliance := protected.Group("/compliance")
+			compliance := employer.Group("/compliance")
 			compliance.Use(middleware.RequireRole("compliance"))
 			{
 				compliance.GET("/report", complianceHandler.GetComplianceReport)
 			}
+		}
+
+		// Worker routes — JWT → worker gate → employee_id-scoped data only.
+		worker := v1.Group("/worker")
+		worker.Use(middleware.JWTAuth())
+		worker.Use(middleware.RequireWorker())
+		{
+			worker.GET("/wages", advanceHandler.GetEarnedWages)
+			worker.POST("/advances", advanceHandler.RequestAdvance)
+			worker.GET("/advances", advanceHandler.GetAdvanceHistory)
 		}
 	}
 

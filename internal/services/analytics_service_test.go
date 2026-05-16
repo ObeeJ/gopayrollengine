@@ -1,5 +1,5 @@
 // Package services_test contains unit tests for the analytics and webhook reconciliation logic.
-// Tests are intentionally decoupled from the DB and Monnify by using local helper functions
+// Package services_test — unit tests using local helpers; no DB or Monnify required.
 // (computeRisk, resolvePayrollStatus) that mirror the production logic.
 package services
 

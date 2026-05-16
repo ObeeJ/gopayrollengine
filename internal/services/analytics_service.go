@@ -3,17 +3,22 @@ package services
 import (
 	"fmt"
 	"go-payroll-engine/internal/integrations/monnify"
-	"go-payroll-engine/internal/models"
+	"go-payroll-engine/internal/repository"
 	"os"
 )
 
 type AnalyticsService struct {
 	MonnifyClient *monnify.Client
+	payrollRepo   repository.PayrollRepository
+	employeeRepo  repository.EmployeeRepository
 }
 
-func NewAnalyticsService() *AnalyticsService {
+// NewAnalyticsService — wires up analytics with its dependencies.
+func NewAnalyticsService(pr repository.PayrollRepository, er repository.EmployeeRepository) *AnalyticsService {
 	return &AnalyticsService{
 		MonnifyClient: monnify.NewClient(),
+		payrollRepo:   pr,
+		employeeRepo:  er,
 	}
 }
 
@@ -24,39 +29,26 @@ type PredictionResult struct {
 	Message         string  `json:"message"`
 }
 
-// GetPredictiveCashFlow calculates the expected cost of the next payroll cycle
-// and compares it against the live Monnify wallet balance to produce a risk assessment.
-//
-// Prediction logic:
-//   - If completed payroll history exists: weighted sliding window average of last 3
-//     batches. Weights [3,2,1] (most recent weighted highest) detect salary growth
-//     trends that a simple average would underestimate.
-//   - If no history: sum current active employee salaries as a cold-start baseline.
-//
-// Risk levels:
-//   - High   → balance < predicted amount (cannot cover payroll).
-//   - Medium → balance < predicted amount * 1.2 (less than 20% buffer).
-//   - Low    → balance is comfortably above the predicted amount.
-func (s *AnalyticsService) GetPredictiveCashFlow() (*PredictionResult, error) {
-	var payrolls []models.Payroll
-	// Fetch the most recent 3 completed batches ordered newest-first.
-	if err := models.DB.Where("status = ?", models.PayrollCompleted).Order("created_at desc").Limit(3).Find(&payrolls).Error; err != nil {
+// GetPredictiveCashFlow — weighted sliding window forecast vs live wallet balance.
+// Weights [3,2,1] bias toward recent payrolls to catch salary growth trends early.
+func (s *AnalyticsService) GetPredictiveCashFlow(orgID string) (*PredictionResult, error) {
+	payrolls, err := s.payrollRepo.FindCompleted(orgID, 3)
+	if err != nil {
 		return nil, err
 	}
 
 	var predictedAmount float64
 	if len(payrolls) == 0 {
-		// Cold-start: no history yet — sum active salaries as a baseline estimate.
-		var employees []models.Employee
-		models.DB.Where("is_active = ?", true).Find(&employees)
+		// Cold-start: no history — sum active salaries as a baseline.
+		employees, err := s.employeeRepo.FindAllActive(orgID)
+		if err != nil {
+			return nil, err
+		}
 		for _, e := range employees {
 			predictedAmount += e.Salary
 		}
 	} else {
-		// Weighted sliding window: payrolls[0] is most recent (weight 3),
-		// payrolls[1] is second (weight 2), payrolls[2] is oldest (weight 1).
-		// This biases the forecast toward recent salary changes rather than
-		// treating all months equally, giving a more accurate buffer warning.
+		// Weighted sliding window: most recent = weight 3, second = 2, oldest = 1.
 		weights := []float64{3, 2, 1}
 		var weightedSum, totalWeight float64
 		for i, p := range payrolls {
@@ -67,23 +59,18 @@ func (s *AnalyticsService) GetPredictiveCashFlow() (*PredictionResult, error) {
 		predictedAmount = weightedSum / totalWeight
 	}
 
-	// Fetch the live wallet balance from Monnify to compare against the forecast.
 	walletNumber := os.Getenv("MONNIFY_SOURCE_WALLET")
 	currentBalance, err := s.MonnifyClient.GetWalletBalance(walletNumber)
 	if err != nil {
 		return nil, fmt.Errorf("could not fetch balance: %v", err)
 	}
 
-	// Determine risk level based on headroom above the predicted cost.
 	riskLevel := "Low"
 	message := "Your balance is sufficient for the next payroll cycle."
-
 	if currentBalance < predictedAmount {
-		// Balance cannot cover the next payroll — immediate action required.
 		riskLevel = "High"
 		message = fmt.Sprintf("Warning: Your balance (%.2f) is less than the predicted payroll amount (%.2f). Please fund your wallet.", currentBalance, predictedAmount)
 	} else if currentBalance < predictedAmount*1.2 {
-		// Less than 20% buffer — worth topping up before the next cycle.
 		riskLevel = "Medium"
 		message = "Your balance is close to the predicted payroll amount. Consider adding more funds."
 	}

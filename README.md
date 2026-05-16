@@ -1,275 +1,366 @@
 <div align="center">
-
-<br/>
-
-<img src="https://capsule-render.vercel.app/api?type=waving&color=0:0f0c29,50:302b63,100:24243e&height=200&section=header&text=go-payroll-engine&fontSize=52&fontColor=ffffff&fontAlignY=38&desc=Production-grade%20FinTech%20Payroll%20Disbursement%20Engine&descAlignY=58&descSize=18&descColor=a78bfa" width="100%"/>
-
-<br/>
-
-[![CI](https://github.com/obeej/go-payroll-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/obeej/go-payroll-engine/actions)
-![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat-square&logo=go&logoColor=white)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-4169E1?style=flat-square&logo=postgresql&logoColor=white)
-![Redis](https://img.shields.io/badge/Redis-7-DC382D?style=flat-square&logo=redis&logoColor=white)
-![License](https://img.shields.io/badge/License-MIT-a78bfa?style=flat-square)
-![Status](https://img.shields.io/badge/Status-Production--Ready-22c55e?style=flat-square)
-
-<br/>
-
-> **Not a tutorial project.**
-> The kind of backend a Series A FinTech runs in production —
-> built to PCI DSS, NDPR, SOC 2, and CBN standards from day one.
-
-<br/>
-
+  <img src="https://capsule-render.vercel.app/api?type=waving&color=0:000000,100:1a1a2e&height=160&section=header&text=go-payroll-engine&fontSize=42&fontColor=ffffff&fontAlignY=45&desc=Payroll%20Disbursement%20Infrastructure%20for%20FinTech&descSize=16&descColor=888888&descAlignY=65" width="100%" />
 </div>
 
----
+<br />
 
 <div align="center">
 
-## What This Is
+[![CI](https://github.com/obeej/go-payroll-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/obeej/go-payroll-engine/actions)&nbsp;
+![Go](https://img.shields.io/badge/Go_1.22+-00ADD8?style=flat-square&logo=go&logoColor=white)&nbsp;
+![Postgres](https://img.shields.io/badge/PostgreSQL_15-4169E1?style=flat-square&logo=postgresql&logoColor=white)&nbsp;
+![Redis](https://img.shields.io/badge/Redis_7-DC382D?style=flat-square&logo=redis&logoColor=white)&nbsp;
+![License](https://img.shields.io/badge/MIT-white?style=flat-square)
 
 </div>
 
-A fully async payroll disbursement engine that handles bulk salary transfers via **Monnify**, hardened across every layer a global FinTech regulator will examine — security, compliance, observability, and data integrity.
+<br />
 
-Every design decision in this codebase maps to a real standard. Nothing is bolted on after the fact.
+<div align="center">
+<p><strong>Async bulk salary disbursement engine built to global FinTech production standards.</strong><br/>
+PCI DSS · NDPR · SOC 2 · CBN — compliance by design, not by retrofit.</p>
+</div>
+
+<br />
 
 ---
 
-<div align="center">
+<br />
+
+## Overview
+
+go-payroll-engine is a backend system for processing bulk payroll disbursements through Monnify. It handles the full lifecycle — from payroll batch creation through background processing, real-time webhook reconciliation, and compliance evidence generation.
+
+The codebase is designed as a reference implementation of what production FinTech infrastructure looks like: every security control, compliance requirement, and observability concern addressed at the architecture level rather than patched in later.
+
+<br />
+
+---
+
+<br />
 
 ## Architecture
 
-</div>
+<br />
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        HTTP API  (Gin)                       │
-│                                                              │
-│  JWT Auth + RBAC  →  Multi-tenant Scoping  →  Rate Limit    │
-│  Idempotency Keys  →  PII Encryption  →  Prometheus Metrics  │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   Asynq Worker  (Redis)                      │
-│                                                              │
-│   FSM State Machine  →  N+1 Fix (Hash Map)  →  Monnify API  │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    Webhook Handler                           │
-│                                                              │
-│  HMAC-SHA512 Verify  →  Bloom Filter  →  Atomic Counter     │
-│  FSM Transition  →  Audit Log  →  Reconcile                  │
-└─────────────────────────────────────────────────────────────┘
+  Client Request
+       │
+       ▼
+  ┌─────────────────────────────────────────────────────┐
+  │  API Layer                                          │
+  │                                                     │
+  │  SecurityHeaders → BodyLimit → Logger → Metrics     │
+  │  RateLimit → JWTAuth → TenantScope → DataResidency  │
+  └────────────────────────┬────────────────────────────┘
+                           │
+                           ▼
+  ┌─────────────────────────────────────────────────────┐
+  │  Service Layer                                      │
+  │                                                     │
+  │  CreatePayroll → DB Transaction → Redis Enqueue     │
+  └────────────────────────┬────────────────────────────┘
+                           │
+                           ▼
+  ┌─────────────────────────────────────────────────────┐
+  │  Worker Layer                          (Asynq)      │
+  │                                                     │
+  │  FSM Transition → Employee Hash Map → Monnify API   │
+  └────────────────────────┬────────────────────────────┘
+                           │
+                           ▼
+  ┌─────────────────────────────────────────────────────┐
+  │  Webhook Handler                                    │
+  │                                                     │
+  │  HMAC Verify → Bloom Filter → FSM → Atomic Counter  │
+  │  → Audit Log → Reconcile Parent Payroll             │
+  └─────────────────────────────────────────────────────┘
 ```
+
+<br />
 
 ---
 
-<div align="center">
+<br />
 
-## Security Layer
+## Security
 
-</div>
+<br />
 
 <table>
+<thead>
 <tr>
-<td width="50%">
+<th width="25%">Authentication</th>
+<th width="25%">Encryption</th>
+<th width="25%">Transport</th>
+<th width="25%">Abuse Prevention</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td valign="top">
 
-**Authentication & Identity**
-- JWT with org-scoped claims (multi-tenant)
-- RBAC — `RequireRole("compliance")` gate
-- Timing-safe API key comparison (`hmac.Equal`)
-- bcrypt cost-12 password hashing
+JWT with org-scoped claims
+
+RBAC role gates
+
+bcrypt cost-12
+
+Timing-safe key comparison
 
 </td>
-<td width="50%">
+<td valign="top">
 
-**Data Protection**
-- AES-256-GCM envelope encryption on all PII
-- Transparent `EncryptedString` GORM type
-- HMAC-SHA512 webhook signature verification
-- PII redaction in all structured logs
+AES-256-GCM on all PII fields
+
+Transparent GORM serializer
+
+Envelope encryption (KEK/DEK)
+
+KMS-ready interface
+
+</td>
+<td valign="top">
+
+OWASP security headers
+
+1 MB body size limit
+
+Non-root Docker image
+
+Production startup guards
+
+</td>
+<td valign="top">
+
+Token bucket rate limiting
+
+Idempotency keys (Redis, 24h)
+
+Bloom filter deduplication
+
+HMAC-SHA512 webhook verification
 
 </td>
 </tr>
-<tr>
-<td width="50%">
-
-**Transport & Runtime**
-- OWASP security headers on every response
-- 1MB request body size limit
-- Non-root Docker container
-- Production startup guards (refuses to boot without KEK / JWT secret)
-
-</td>
-<td width="50%">
-
-**Abuse Prevention**
-- Token bucket rate limiting per API key / IP
-- Idempotency keys — network retry does not equal double payment
-- Bloom filter webhook deduplication (~1% FP, O(1))
-- Constant-time comparisons throughout
-
-</td>
-</tr>
+</tbody>
 </table>
+
+<br />
 
 ---
 
-<div align="center">
+<br />
 
-## DSA Patterns — Every One Justified
+## Data Integrity
 
-</div>
+<br />
 
-| Pattern | Location | Why It's Here |
+| Pattern | File | Guarantee |
 |:---|:---|:---|
-| Hash Map | `payroll_worker.go` | O(1) employee lookup per item — kills the N+1 query |
-| Token Bucket | `middleware/ratelimit.go` | Per-key sustained throttle with burst allowance |
-| Bloom Filter | `middleware/bloom.go` | O(1) probabilistic duplicate detection before any DB read |
-| Finite State Machine | `models/models.go` | Illegal transitions (e.g. `completed→processing`) rejected before DB write |
-| Atomic Counter | `models/models.go` + webhook | `pending_count` decrements per webhook — reconciliation fires exactly once |
-| Weighted Sliding Window | `analytics_service.go` | Biases cash flow forecast toward recent payroll data |
-| Append-Only Log | `audit_events` table | Immutable history — CBN, NDPR, SOC 2 all require it |
-| Envelope Encryption | `models/encryption.go` | KEK + DEK separation, KMS-ready without code changes |
-| DAG Scoping | `models/db.go` | `ScopedDB(orgID)` — every query scoped to tenant, cross-tenant leakage impossible |
+| Finite State Machine | `models/models.go` | Illegal status transitions rejected before any DB write |
+| Atomic Counter | `models/models.go` | Webhook reconciliation fires exactly once per batch |
+| Hash Map | `workers/payroll_worker.go` | O(1) employee lookup — eliminates N+1 query pattern |
+| Bloom Filter | `middleware/bloom.go` | ~99% of duplicate webhooks caught before DB read |
+| Append-Only Log | `audit_events` table | Immutable record of every state change — no UPDATE, no DELETE |
+| Idempotency Map | `middleware/idempotency.go` | Network retry cannot create duplicate payroll batch |
+| Weighted Sliding Window | `services/analytics_service.go` | Cash flow forecast biased toward recent data |
+| Envelope Encryption | `models/encryption.go` | PII encrypted at rest, decrypted transparently on read |
+| DAG Tenant Scoping | `models/db.go` | Every query scoped to org — cross-tenant leakage structurally impossible |
+
+<br />
 
 ---
 
-<div align="center">
+<br />
 
-## Compliance Stack
+## Compliance
 
-</div>
+<br />
 
 <table>
+<thead>
 <tr>
-<td align="center" width="25%">
+<th width="25%">CBN</th>
+<th width="25%">NDPR</th>
+<th width="25%">SOC 2</th>
+<th width="25%">Data Residency</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td valign="top">
 
-**CBN**
+BVN verification via Dojah at employee creation.
 
-BVN verification at employee creation via Dojah API. KYC before any payroll data is stored.
+KYC recorded before any payroll data is stored.
 
-</td>
-<td align="center" width="25%">
-
-**NDPR**
-
-Append-only consent records per employee per type. Withdrawal creates a new row — nothing is deleted.
-
-</td>
-<td align="center" width="25%">
-
-**SOC 2**
-
-Daily evidence snapshots — audit events, migration version, payroll activity, security checks. One-click compliance report endpoint.
+Response hash stored — not the BVN itself.
 
 </td>
-<td align="center" width="25%">
+<td valign="top">
 
-**Data Residency**
+Append-only consent records per employee per type.
 
-`data_region` on every org. Geo-fencing middleware rejects cross-region requests before any handler runs.
+Withdrawal creates a new row — history is never mutated.
+
+Consent expiry enforced at query time.
+
+</td>
+<td valign="top">
+
+Daily evidence snapshots to JSON.
+
+One-click compliance report endpoint.
+
+Migration version, audit counts, security checks all captured.
+
+</td>
+<td valign="top">
+
+`data_region` field on every organization.
+
+Geo-fencing middleware rejects cross-region requests.
+
+Default region `ng` — zero breaking changes for existing orgs.
 
 </td>
 </tr>
+</tbody>
 </table>
+
+<br />
 
 ---
 
-<div align="center">
+<br />
 
 ## Observability
 
-</div>
+<br />
 
 ```
-Prometheus  ──→  /metrics endpoint (scraped every 15s)
-    │
-    ▼
-Grafana Dashboard  (11 pre-built panels)
-    ├── HTTP request rate + error %
-    ├── API latency p95 by route
-    ├── Monnify call latency p95 + success rate
-    ├── Payroll processing duration p95
-    ├── Auth failures by type (jwt_invalid / api_key_wrong)
-    ├── Rate limit hits by key type
-    ├── Webhook duplicate catch rate
-    └── BVN verification success rate
+  /metrics  ──→  Prometheus (scrape interval: 15s)
+                      │
+                      ▼
+               Grafana Dashboard
+                      │
+       ┌──────────────┼──────────────┐
+       │              │              │
+  HTTP Layer     Payment Layer   Security Layer
+       │              │              │
+  request rate    Monnify p95    auth failures
+  error rate %    success rate   rate limit hits
+  latency p95     batch duration  webhook dupes
 ```
 
-Spin up the full stack in one command:
+<br />
+
+Start the full observability stack:
 
 ```bash
 docker-compose up
-# Grafana    → http://localhost:3000
-# Prometheus → http://localhost:9090
-# Metrics    → http://localhost:8080/metrics
 ```
+
+| Service | URL |
+|:---|:---|
+| API | http://localhost:8080 |
+| Grafana | http://localhost:3000 |
+| Prometheus | http://localhost:9090 |
+| Metrics | http://localhost:8080/metrics |
+
+<br />
 
 ---
 
-<div align="center">
+<br />
 
-## Quick Start
+## Getting Started
 
-</div>
+<br />
+
+**Prerequisites:** Go 1.22+, Docker, PostgreSQL 15, Redis 7
 
 ```bash
-# 1. Clone and configure
+# Clone
 git clone https://github.com/obeej/go-payroll-engine.git
 cd go-payroll-engine
-cp .env.example .env
 
-# 2. Start infrastructure
+# Configure
+cp .env.example .env
+# Edit .env — set JWT_SECRET, ENCRYPTION_KEK, MONNIFY credentials
+
+# Start infrastructure
 docker-compose up db redis -d
 
-# 3. Seed the database
+# Seed database
 APP_MODE=seed go run cmd/api/main.go
 
-# 4. Run API server
+# Start API server
 APP_MODE=api go run cmd/api/main.go
 
-# 5. Run background worker (separate terminal)
+# Start background worker (separate terminal)
 APP_MODE=worker go run cmd/api/main.go
 ```
 
----
-
-<div align="center">
-
-## API Reference
-
-</div>
-
-| Method | Endpoint | Auth | Description |
-|:---:|:---|:---:|:---|
-| `POST` | `/api/v1/auth/login` | Public | Issue JWT |
-| `POST` | `/api/v1/auth/refresh` | JWT | Refresh token |
-| `POST` | `/api/v1/employees/` | JWT + Idempotency | Create employee (BVN verified + consent recorded) |
-| `GET` | `/api/v1/employees/` | JWT | List employees (paginated) |
-| `POST` | `/api/v1/payrolls/` | JWT + Idempotency | Initiate payroll batch — queued async |
-| `GET` | `/api/v1/payrolls/:id` | JWT | Batch status + all items |
-| `GET` | `/api/v1/analytics/predictive` | JWT | Cash flow forecast + risk level |
-| `POST` | `/api/v1/consent/` | JWT | Record NDPR consent |
-| `GET` | `/api/v1/consent/:employee_id` | JWT | Full consent history |
-| `GET` | `/api/v1/compliance/report` | JWT `role=compliance` | 30-day SOC 2 / CBN evidence bundle |
-| `POST` | `/api/v1/webhooks/monnify` | HMAC | Disbursement reconciliation |
-| `GET` | `/healthz` | Public | Liveness probe |
-| `GET` | `/readyz` | Public | Readiness probe (DB + Redis + encryption) |
-| `GET` | `/metrics` | Public | Prometheus scrape |
+<br />
 
 ---
 
-<div align="center">
+<br />
 
-## Tech Stack
+## API
 
-</div>
+<br />
+
+**Authentication**
+
+| Method | Path | Description |
+|:---|:---|:---|
+| `POST` | `/api/v1/auth/login` | Issue JWT |
+| `POST` | `/api/v1/auth/refresh` | Refresh token |
+
+**Employees**
+
+| Method | Path | Description |
+|:---|:---|:---|
+| `POST` | `/api/v1/employees/` | Create employee — BVN verified, consent recorded, PII encrypted |
+| `GET` | `/api/v1/employees/` | List employees (paginated) |
+
+**Payroll**
+
+| Method | Path | Description |
+|:---|:---|:---|
+| `POST` | `/api/v1/payrolls/` | Initiate batch — idempotent, queued async |
+| `GET` | `/api/v1/payrolls/:id` | Batch status and all disbursement items |
+
+**Analytics & Compliance**
+
+| Method | Path | Description |
+|:---|:---|:---|
+| `GET` | `/api/v1/analytics/predictive` | Cash flow forecast with risk level |
+| `POST` | `/api/v1/consent/` | Record NDPR consent |
+| `GET` | `/api/v1/consent/:employee_id` | Full consent history |
+| `GET` | `/api/v1/compliance/report` | 30-day SOC 2 / CBN evidence bundle — requires `role=compliance` |
+
+**Infrastructure**
+
+| Method | Path | Description |
+|:---|:---|:---|
+| `POST` | `/api/v1/webhooks/monnify` | Disbursement reconciliation — HMAC verified |
+| `GET` | `/healthz` | Liveness probe |
+| `GET` | `/readyz` | Readiness — checks DB, Redis, encryption key |
+| `GET` | `/metrics` | Prometheus scrape endpoint |
+
+<br />
+
+---
+
+<br />
+
+## Stack
+
+<br />
 
 <div align="center">
 
@@ -283,74 +374,81 @@ APP_MODE=worker go run cmd/api/main.go
 
 </div>
 
-<br/>
+<br />
 
 | Layer | Technology |
 |:---|:---|
 | Language | Go 1.22+ |
 | Web framework | Gin |
 | ORM | GORM |
-| Background jobs | Asynq (Redis-backed) |
-| Migrations | golang-migrate (versioned SQL) |
-| Auth | golang-jwt/jwt/v5 + bcrypt |
+| Background jobs | Asynq |
+| Migrations | golang-migrate |
+| Auth | golang-jwt/jwt/v5 |
 | Metrics | Prometheus + Grafana |
 | Payment gateway | Monnify |
-| KYC | Dojah (BVN verification) |
+| KYC | Dojah |
+
+<br />
 
 ---
 
-<div align="center">
-
-## Testing
-
-</div>
-
-```bash
-# Run all tests with race detector
-go test ./... -race -count=1
-
-# Run with coverage
-go test ./... -coverprofile=coverage.out
-go tool cover -html=coverage.out
-```
-
----
-
-<div align="center">
+<br />
 
 ## Project Structure
 
-</div>
+<br />
 
 ```
 go-payroll-engine/
-├── cmd/api/              # Entrypoint — api | worker | seed | collect-evidence
-├── config/               # Prometheus scrape config + Grafana dashboard JSON
+├── cmd/api/                    # Entrypoint — api | worker | seed | collect-evidence
+├── config/                     # Prometheus config, Grafana dashboard
 ├── internal/
 │   ├── api/
-│   │   ├── handlers/     # HTTP handlers (auth, employees, payrolls, compliance...)
-│   │   ├── middleware/   # JWT, rate limit, idempotency, bloom, residency, PII logger
-│   │   └── routes.go     # Full middleware stack + route registration
-│   ├── db/migrations/    # Versioned SQL migrations (000001 → 000003)
+│   │   ├── handlers/           # auth, employees, payrolls, webhooks, compliance
+│   │   ├── middleware/         # jwt, ratelimit, idempotency, bloom, residency, logger
+│   │   └── routes.go
+│   ├── db/
+│   │   └── migrations/         # 000001 → 000003 versioned SQL
 │   ├── integrations/
-│   │   └── monnify/      # Bulk transfer + wallet balance client (mock-mode aware)
-│   ├── models/           # GORM models + FSM + encryption + audit log
-│   ├── observability/    # Prometheus metric definitions
-│   ├── services/         # Payroll, analytics, BVN, SOC 2 evidence collector
-│   └── workers/          # Asynq task handler + Redis + Asynq clients
-└── pkg/money/            # Kobo type — integer arithmetic, banker's rounding
+│   │   └── monnify/            # bulk transfer + wallet balance (mock-aware)
+│   ├── models/                 # GORM models, FSM, encryption, audit log
+│   ├── observability/          # Prometheus metric definitions
+│   ├── services/               # payroll, analytics, BVN, SOC 2 collector
+│   └── workers/                # Asynq handlers, Redis client, Asynq client
+└── pkg/
+    └── money/                  # Kobo type — integer arithmetic, banker's rounding
 ```
+
+<br />
 
 ---
 
+<br />
+
+## Testing
+
+<br />
+
+```bash
+# All tests with race detector
+go test ./... -race -count=1
+
+# With coverage report
+go test ./... -coverprofile=coverage.out && go tool cover -html=coverage.out
+```
+
+<br />
+
+---
+
+<br />
+
 <div align="center">
 
-## License
+MIT License
 
-MIT — use it, fork it, learn from it.
+<br />
 
-<br/>
-
-<img src="https://capsule-render.vercel.app/api?type=waving&color=0:24243e,50:302b63,100:0f0c29&height=120&section=footer" width="100%"/>
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:1a1a2e,100:000000&height=100&section=footer" width="100%" />
 
 </div>

@@ -1,0 +1,7 @@
+.git
+vendor
+payroll-app
+.env
+Dockerfile
+docker-compose.yml
+README.md

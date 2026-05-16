@@ -1,0 +1,43 @@
+# ── Secrets — never commit these ──────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+
+# ── Business IP — private repo only ───────────────────────────────────────────
+PRODUCT.md
+ROADMAP.md
+evidence/
+
+# ── Compiled binaries ─────────────────────────────────────────────────────────
+payroll-app
+/dist/
+/bin/
+*.exe
+*.out
+
+# ── Go ────────────────────────────────────────────────────────────────────────
+vendor/
+*.test
+
+# ── Test coverage ─────────────────────────────────────────────────────────────
+coverage.out
+coverage.html
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*.DS_Store
+Thumbs.db
+
+# ── Docker volumes (contain runtime data, not source) ─────────────────────────
+grafana_data/
+prometheus_data/
+postgres_data/

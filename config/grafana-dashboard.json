@@ -1,0 +1,106 @@
+{
+  "title": "Payroll System — FinTech Dashboard",
+  "uid": "payroll-fintech",
+  "schemaVersion": 38,
+  "panels": [
+    {
+      "title": "HTTP Request Rate (req/s)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [{
+        "expr": "sum(rate(payroll_http_requests_total[1m])) by (method, path)",
+        "legendFormat": "{{method}} {{path}}"
+      }]
+    },
+    {
+      "title": "HTTP Error Rate (%)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [{
+        "expr": "sum(rate(payroll_http_requests_total{status=~\"5..\"}[1m])) / sum(rate(payroll_http_requests_total[1m])) * 100",
+        "legendFormat": "5xx error rate %"
+      }]
+    },
+    {
+      "title": "API Latency p95 (seconds)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum(rate(payroll_http_request_duration_seconds_bucket[5m])) by (le, path))",
+        "legendFormat": "p95 {{path}}"
+      }]
+    },
+    {
+      "title": "Monnify API Latency p95 (seconds)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum(rate(monnify_api_call_duration_seconds_bucket[5m])) by (le, operation))",
+        "legendFormat": "p95 {{operation}}"
+      }]
+    },
+    {
+      "title": "Monnify Success Rate (%)",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 16, "w": 6, "h": 4 },
+      "targets": [{
+        "expr": "sum(rate(monnify_api_calls_total{success=\"true\"}[5m])) / sum(rate(monnify_api_calls_total[5m])) * 100",
+        "legendFormat": "Monnify success %"
+      }]
+    },
+    {
+      "title": "Payroll Batches Created (24h)",
+      "type": "stat",
+      "gridPos": { "x": 6, "y": 16, "w": 6, "h": 4 },
+      "targets": [{
+        "expr": "sum(increase(payroll_batches_created_total[24h]))",
+        "legendFormat": "batches"
+      }]
+    },
+    {
+      "title": "Auth Failures (1h)",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 16, "w": 6, "h": 4 },
+      "targets": [{
+        "expr": "sum(increase(payroll_auth_failures_total[1h]))",
+        "legendFormat": "auth failures"
+      }]
+    },
+    {
+      "title": "Rate Limit Hits (1h)",
+      "type": "stat",
+      "gridPos": { "x": 18, "y": 16, "w": 6, "h": 4 },
+      "targets": [{
+        "expr": "sum(increase(payroll_rate_limit_hits_total[1h]))",
+        "legendFormat": "rate limit hits"
+      }]
+    },
+    {
+      "title": "Webhook Duplicates Caught (24h)",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 20, "w": 6, "h": 4 },
+      "targets": [{
+        "expr": "increase(payroll_webhook_duplicates_total[24h])",
+        "legendFormat": "duplicates"
+      }]
+    },
+    {
+      "title": "BVN Verification Success Rate (%)",
+      "type": "stat",
+      "gridPos": { "x": 6, "y": 20, "w": 6, "h": 4 },
+      "targets": [{
+        "expr": "sum(rate(payroll_bvn_verifications_total{status=\"verified\"}[24h])) / sum(rate(payroll_bvn_verifications_total[24h])) * 100",
+        "legendFormat": "BVN success %"
+      }]
+    },
+    {
+      "title": "Payroll Processing Duration p95 (seconds)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 20, "w": 12, "h": 8 },
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum(rate(payroll_processing_duration_seconds_bucket[5m])) by (le, org_id))",
+        "legendFormat": "p95 org={{org_id}}"
+      }]
+    }
+  ]
+}

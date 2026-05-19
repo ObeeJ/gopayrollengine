@@ -16,6 +16,18 @@ import (
 // 24 hours covers any reasonable client retry window for payment operations.
 const idempotencyTTL = 24 * time.Hour
 
+// inflightTTL bounds how long a SETNX in-flight marker can live before
+// being reclaimed. Generous enough to outlast a slow handler (a payroll
+// create that spawns an Asynq task plus N item inserts can take seconds);
+// short enough that a crashed worker doesn't permanently lock the key.
+const inflightTTL = 60 * time.Second
+
+// inflightSentinel marks a key as in-progress between cache miss and
+// successful completion. Replaced atomically by the real cached response
+// when the handler finishes; remains until inflightTTL expires if the
+// handler crashes.
+const inflightSentinel = "__inflight__"
+
 // cachedResponse is the structure stored in Redis for each idempotency key.
 // Storing status + body lets us replay the exact original response on retries.
 type cachedResponse struct {
@@ -66,6 +78,20 @@ func Idempotency(rdb *redis.Client) gin.HandlerFunc {
 		// O(1) Redis GET — check if this key was already processed.
 		cached, err := rdb.Get(ctx, redisKey).Bytes()
 		if err == nil {
+			// Distinguish the in-flight sentinel from a completed response. A
+			// second identical request arriving while the first is still being
+			// processed must NOT execute the handler again — that would double-
+			// debit the payment. We reject it with 409; the client should retry
+			// after a short backoff, by which time the original response will
+			// have replaced the sentinel.
+			if string(cached) == inflightSentinel {
+				c.Header("Retry-After", "1")
+				c.JSON(http.StatusConflict, gin.H{
+					"error": "a request with this Idempotency-Key is still in flight; retry shortly",
+				})
+				c.Abort()
+				return
+			}
 			// Cache hit — replay the original response, do not re-execute the handler.
 			var resp cachedResponse
 			if json.Unmarshal(cached, &resp) == nil {
@@ -76,7 +102,28 @@ func Idempotency(rdb *redis.Client) gin.HandlerFunc {
 			}
 		}
 
-		// Cache miss — wrap the writer to capture the response for caching.
+		// Cache miss — claim the key with SETNX. Only the first caller wins;
+		// concurrent duplicate requests see the sentinel above and back off.
+		// Without this lock, two requests that both miss the cache could both
+		// run the handler — two payroll batches created from one Idempotency-
+		// Key, which is the exact failure mode the header is supposed to prevent.
+		acquired, err := rdb.SetNX(ctx, redisKey, inflightSentinel, inflightTTL).Result()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "idempotency backend unavailable"})
+			c.Abort()
+			return
+		}
+		if !acquired {
+			// Another concurrent request acquired the lock between our GET and SETNX.
+			c.Header("Retry-After", "1")
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "a request with this Idempotency-Key is still in flight; retry shortly",
+			})
+			c.Abort()
+			return
+		}
+
+		// Wrap the writer to capture the response for caching.
 		rec := &responseRecorder{
 			ResponseWriter: c.Writer,
 			body:           &bytes.Buffer{},
@@ -90,13 +137,18 @@ func Idempotency(rdb *redis.Client) gin.HandlerFunc {
 
 		c.Next()
 
-		// Only cache successful responses — do not cache 4xx/5xx so clients can retry.
+		// Only cache successful responses — do not cache 4xx/5xx so clients
+		// can retry. On non-2xx, release the in-flight lock immediately so
+		// the next attempt isn't blocked until inflightTTL expires.
 		if rec.status >= 200 && rec.status < 300 {
 			resp := cachedResponse{Status: rec.status, Body: rec.body.Bytes()}
 			if data, err := json.Marshal(resp); err == nil {
-				// SET with TTL — O(1). Key expires automatically, no cleanup needed.
+				// Overwrites the sentinel with the real response, atomically
+				// extending the TTL to the full retry window.
 				rdb.Set(ctx, redisKey, data, idempotencyTTL)
 			}
+		} else {
+			rdb.Del(ctx, redisKey)
 		}
 	}
 }

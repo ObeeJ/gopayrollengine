@@ -72,10 +72,12 @@ func (s *BVNService) VerifyBVN(orgID, employeeID, bvn string) (*models.BVNVerifi
 	if err != nil {
 		return nil, fmt.Errorf("dojah unreachable: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var dojahResp dojahBVNResponse
-	json.NewDecoder(resp.Body).Decode(&dojahResp)
+	if err := json.NewDecoder(resp.Body).Decode(&dojahResp); err != nil {
+		return nil, fmt.Errorf("dojah response decode failed: %w", err)
+	}
 
 	status := "verified"
 	if dojahResp.Error != "" || resp.StatusCode != http.StatusOK {

@@ -68,7 +68,7 @@ func runMigrations(dsn string) {
 	if err != nil {
 		log.Fatal("Migration init failed — check your migrations folder and DSN:", err)
 	}
-	defer m.Close()
+	defer func() { _, _ = m.Close() }()
 
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 		if os.Getenv("APP_ENV") == "production" {

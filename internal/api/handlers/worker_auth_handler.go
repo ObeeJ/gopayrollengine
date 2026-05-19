@@ -52,7 +52,9 @@ func (h *WorkerAuthHandler) WorkerLogin(c *gin.Context) {
 		return
 	}
 
-	h.userRepo.UpdateLastLogin(user.ID)
+	if err := h.userRepo.UpdateLastLogin(user.ID); err != nil {
+		middleware.Logger.Warn("UpdateLastLogin failed", "user_id", user.ID, "error", err.Error())
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"token":       token,

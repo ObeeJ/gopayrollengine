@@ -76,10 +76,12 @@ func (c *Client) Authenticate() error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var authResp AuthResponse
-	json.NewDecoder(resp.Body).Decode(&authResp)
+	if err := json.NewDecoder(resp.Body).Decode(&authResp); err != nil {
+		return fmt.Errorf("monnify auth response decode failed: %w", err)
+	}
 
 	if !authResp.RequestSuccessful {
 		return fmt.Errorf("monnify authentication failed")
@@ -148,10 +150,12 @@ func (c *Client) InitiateBulkTransfer(payload BulkTransferRequest) (*BulkTransfe
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var bulkResp BulkTransferResponse
-	json.NewDecoder(resp.Body).Decode(&bulkResp)
+	if err := json.NewDecoder(resp.Body).Decode(&bulkResp); err != nil {
+		return nil, fmt.Errorf("monnify bulk transfer response decode failed: %w", err)
+	}
 	success := "true"
 	if !bulkResp.RequestSuccessful {
 		success = "false"
@@ -197,10 +201,12 @@ func (c *Client) GetWalletBalance(walletNumber string) (money.Kobo, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var balanceResp WalletBalanceResponse
-	json.NewDecoder(resp.Body).Decode(&balanceResp)
+	if err := json.NewDecoder(resp.Body).Decode(&balanceResp); err != nil {
+		return 0, fmt.Errorf("monnify wallet balance response decode failed: %w", err)
+	}
 
 	if !balanceResp.RequestSuccessful || len(balanceResp.ResponseBody) == 0 {
 		return 0, fmt.Errorf("failed to fetch wallet balance")

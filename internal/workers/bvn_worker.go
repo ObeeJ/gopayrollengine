@@ -90,10 +90,12 @@ func (h *BVNHandler) ProcessBVNTask(ctx context.Context, t *asynq.Task) error {
 	if err != nil {
 		return fmt.Errorf("dojah unreachable: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var dojahResp dojahBVNResponse
-	json.NewDecoder(resp.Body).Decode(&dojahResp) //nolint:errcheck
+	if err := json.NewDecoder(resp.Body).Decode(&dojahResp); err != nil {
+		return fmt.Errorf("dojah response decode failed: %w", err)
+	}
 
 	rawBytes, _ := json.Marshal(dojahResp)
 	v.Provider = "dojah"

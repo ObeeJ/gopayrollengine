@@ -20,7 +20,7 @@ import (
 )
 
 func main() {
-	godotenv.Load()
+	_ = godotenv.Load() // .env is optional; production uses real env vars
 
 	// Production refuses to start with mock money, missing encryption, or unsigned tokens.
 	if os.Getenv("APP_ENV") == "production" && os.Getenv("MOCK_MODE") == "true" {

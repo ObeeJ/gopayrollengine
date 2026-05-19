@@ -12,6 +12,7 @@
 package money
 
 import (
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -91,9 +92,25 @@ func FromNairaString(s string) (Kobo, error) {
 }
 
 // Naira returns the value as a float64 number of Naira. Lossy by construction —
-// use only for display, never for further arithmetic.
+// use only for display or for external APIs that demand a decimal naira number
+// (e.g. Monnify). Never use the result for further arithmetic.
 func (k Kobo) Naira() float64 {
 	return float64(k) / float64(KoboPerNaira)
+}
+
+// FromNairaFloat converts a float64 number of Naira to Kobo, rounding half away
+// from zero to the nearest kobo. Used only at boundaries where an upstream API
+// is float-typed (Monnify's wallet balance response). Internal code must never
+// touch float for money — call this once at the boundary and stay in Kobo.
+func FromNairaFloat(f float64) Kobo {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0
+	}
+	scaled := f * KoboPerNaira
+	if scaled >= 0 {
+		return Kobo(int64(scaled + 0.5))
+	}
+	return Kobo(int64(scaled - 0.5))
 }
 
 // String returns a human-readable Naira string like "₦1,500.50".
@@ -278,4 +295,44 @@ func Sum(values []Kobo) (Kobo, error) {
 		total = next
 	}
 	return total, nil
+}
+
+// Value implements driver.Valuer so GORM persists Kobo as a BIGINT column.
+// The DB schema must use BIGINT (NOT NUMERIC) — see migration 000005.
+func (k Kobo) Value() (driver.Value, error) {
+	return int64(k), nil
+}
+
+// Scan implements sql.Scanner so GORM reads BIGINT columns into Kobo.
+// Accepts int64, []byte, or string forms — different drivers report BIGINT
+// differently and the pgx/lib-pq pair has historically diverged here.
+func (k *Kobo) Scan(value interface{}) error {
+	if value == nil {
+		*k = 0
+		return nil
+	}
+	switch v := value.(type) {
+	case int64:
+		*k = Kobo(v)
+		return nil
+	case int:
+		*k = Kobo(v)
+		return nil
+	case []byte:
+		n, err := strconv.ParseInt(string(v), 10, 64)
+		if err != nil {
+			return fmt.Errorf("money: cannot scan %q as kobo: %w", v, err)
+		}
+		*k = Kobo(n)
+		return nil
+	case string:
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return fmt.Errorf("money: cannot scan %q as kobo: %w", v, err)
+		}
+		*k = Kobo(n)
+		return nil
+	default:
+		return fmt.Errorf("money: cannot scan %T as kobo", value)
+	}
 }

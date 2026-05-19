@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"go-payroll-engine/internal/observability"
+	"go-payroll-engine/pkg/money"
 	"net/http"
 	"net/url"
 	"os"
@@ -101,6 +102,9 @@ type BulkTransferRequest struct {
 	TransactionList           []TransferDetail `json:"transactionList"`
 }
 
+// TransferDetail is the wire format Monnify expects: amount in major-unit Naira
+// as a decimal float. Internal code stays in Kobo and converts at the boundary
+// via money.Kobo.Naira() when constructing this struct — never the other way.
 type TransferDetail struct {
 	Amount        float64 `json:"amount"`
 	AccountNumber string  `json:"destinationAccountNumber"`
@@ -174,8 +178,9 @@ type WalletBalanceResponse struct {
 }
 
 // GetWalletBalance fetches the current balance of the source wallet used for
-// disbursements. Used by the analytics service to assess payroll funding risk.
-func (c *Client) GetWalletBalance(walletNumber string) (float64, error) {
+// disbursements. The Monnify response is a decimal Naira float; this method
+// converts it to Kobo at the boundary so callers never see a float for money.
+func (c *Client) GetWalletBalance(walletNumber string) (money.Kobo, error) {
 	start := time.Now()
 	defer func() {
 		observability.MonnifyCallDuration.WithLabelValues("wallet_balance").Observe(time.Since(start).Seconds())
@@ -183,7 +188,7 @@ func (c *Client) GetWalletBalance(walletNumber string) (float64, error) {
 
 	if c.MockMode {
 		observability.MonnifyCallsTotal.WithLabelValues("wallet_balance", "true").Inc()
-		return 1000000.0, nil // mock returns a fixed 1M NGN balance for testing
+		return money.FromNaira(1_000_000), nil // ₦1,000,000.00
 	}
 
 	// Validate walletNumber before embedding in URL — prevents SSRF via injection
@@ -212,5 +217,5 @@ func (c *Client) GetWalletBalance(walletNumber string) (float64, error) {
 		return 0, fmt.Errorf("failed to fetch wallet balance")
 	}
 
-	return balanceResp.ResponseBody[0].WalletBalance, nil
+	return money.FromNairaFloat(balanceResp.ResponseBody[0].WalletBalance), nil
 }

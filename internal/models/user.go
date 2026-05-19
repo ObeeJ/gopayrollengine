@@ -3,6 +3,8 @@ package models
 import (
 	"time"
 
+	"go-payroll-engine/pkg/money"
+
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -34,7 +36,7 @@ type AdvanceRequest struct {
 	OrgID        string         `gorm:"index;not null" json:"org_id"`
 	EmployeeID   string         `gorm:"index;not null" json:"employee_id"`
 	UserID       string         `gorm:"index;not null" json:"user_id"`
-	Amount       float64        `json:"amount"`
+	Amount       money.Kobo     `gorm:"type:bigint;not null;default:0" json:"amount"`
 	Reason       string         `json:"reason"`
 	Status       string         `gorm:"default:pending" json:"status"`
 	PaydayTarget time.Time      `json:"payday_target"`

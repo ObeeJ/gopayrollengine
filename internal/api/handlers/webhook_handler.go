@@ -6,9 +6,11 @@ import (
 	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go-payroll-engine/internal/api/middleware"
 	"go-payroll-engine/internal/models"
+	"go-payroll-engine/pkg/money"
 	"io"
 	"net/http"
 	"os"
@@ -22,10 +24,11 @@ type WebhookHandler struct{}
 type MonnifyWebhookPayload struct {
 	EventType string `json:"eventType"`
 	EventData struct {
-		BatchReference       string  `json:"batchReference"`
-		TransactionReference string  `json:"transactionReference"`
-		Status               string  `json:"status"`
-		Amount               float64 `json:"amount"`
+		BatchReference       string     `json:"batchReference"`
+		TransactionReference string     `json:"transactionReference"`
+		Status               string     `json:"status"`
+		// Monnify sends decimal Naira on the wire; Kobo.UnmarshalJSON parses it.
+		Amount money.Kobo `json:"amount"`
 	} `json:"eventData"`
 }
 
@@ -81,9 +84,17 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 		}
 	}
 
-	// Step 3: Load the PayrollItem.
+	// Step 3: Load the PayrollItem via the SECURITY DEFINER lookup function
+	// (migration 000011). We can't set app.org_id yet because we don't know the
+	// orgID until we've read the row, so a normal SELECT would be filtered to
+	// zero rows by the strict RLS policy on payroll_items. The lookup function
+	// bypasses RLS only for this single-UUID read — every other read/write on
+	// payroll_items goes through WithOrgScope. The HMAC check above proves the
+	// reference is authentic before we reach this point.
 	var item models.PayrollItem
-	if err := models.DB.First(&item, "id = ?", ref).Error; err != nil {
+	if err := models.DB.Raw(
+		"SELECT * FROM lookup_payroll_item_for_webhook(?)", ref,
+	).Scan(&item).Error; err != nil || item.ID == "" {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Item not found"})
 		return
 	}
@@ -118,29 +129,58 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 		return
 	}
 
+	// Steps 5–7 run inside one RLS-scoped transaction so all writes for this
+	// webhook event are tenant-isolated and atomic. orgID comes from the item
+	// we just loaded — Monnify's HMAC proves the item reference is authentic.
+	orgID := item.OrganizationID
 	prevStatus := item.Status
-	if err := models.TransitionStatus(models.DB, &item, item.Status, newStatus); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "status update failed"})
+
+	if err := models.WithOrgScope(c.Request.Context(), orgID, func(tx *gorm.DB) error {
+		// Step 5 (write): CAS status transition on the item.
+		if err := models.TransitionStatus(tx, &item, item.Status, newStatus); err != nil {
+			if errors.Is(err, models.ErrStaleStatus) {
+				// Concurrent webhook for the same ref already won; treat as success.
+				return nil
+			}
+			return fmt.Errorf("item status update failed: %w", err)
+		}
+
+		// Step 6: Atomic decrement-and-read in one round-trip. UPDATE...RETURNING
+		// guarantees exactly one webhook observes pending_count=0 even under N
+		// concurrent webhooks — eliminates the decrement-then-SELECT TOCTOU race.
+		var post struct {
+			PendingCount int                  `gorm:"column:pending_count"`
+			Status       models.PayrollStatus `gorm:"column:status"`
+		}
+		if err := tx.Raw(
+			`UPDATE payrolls
+			    SET pending_count = pending_count - 1,
+			        updated_at    = NOW()
+			  WHERE id = ?
+			RETURNING pending_count, status`,
+			item.PayrollID,
+		).Scan(&post).Error; err != nil {
+			return fmt.Errorf("atomic pending_count decrement failed: %w", err)
+		}
+		if post.PendingCount <= 0 {
+			reconcilePayrollStatus(tx, orgID, models.Payroll{
+				ID:     item.PayrollID,
+				Status: post.Status,
+			})
+		}
+
+		// Step 7: Append immutable audit record inside the same tx. A failed
+		// audit here rolls back the entire tx (item transition + counter decrement),
+		// which is the safer trade-off than leaving half-audited state — Monnify
+		// will retry and we'll process the event again cleanly.
+		return models.AppendAuditTx(tx, orgID, "PayrollItem", item.ID, "status_change",
+			string(prevStatus), string(newStatus), c.ClientIP(), "")
+	}); err != nil {
+		middleware.Logger.Error("webhook transaction failed",
+			"item_id", item.ID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "webhook processing failed"})
 		return
 	}
-
-	// Step 6: Atomic counter decrement — O(1), no COUNT queries.
-	// When pending_count reaches zero, reconcile the parent Payroll exactly once.
-	models.DB.Model(&models.Payroll{}).Where("id = ?", item.PayrollID).
-		UpdateColumn("pending_count", gorm.Expr("pending_count - 1"))
-
-	var parent models.Payroll
-	models.DB.Select("id, status, pending_count").First(&parent, "id = ?", item.PayrollID)
-	if parent.PendingCount <= 0 {
-		reconcilePayrollStatus(parent)
-	}
-
-	// Step 7: Append immutable audit record.
-	models.AppendAudit(
-		"PayrollItem", item.ID, "status_change",
-		string(prevStatus), string(newStatus),
-		c.ClientIP(), "",
-	)
 
 	// Mark this ref in the bloom filter so future duplicates skip the DB.
 	if middleware.WebhookBloom != nil {
@@ -151,11 +191,13 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 }
 
 // reconcilePayrollStatus is called exactly once per payroll batch — when the
-// atomic pending_count counter reaches zero. Runs a single COUNT query instead
-// of two COUNT queries on every webhook event (O(1) trigger, O(N) work once).
-func reconcilePayrollStatus(payroll models.Payroll) {
+// atomic pending_count counter reaches zero (guaranteed by UPDATE...RETURNING).
+// Runs inside the caller's RLS-scoped tx so the org boundary is already enforced.
+// The FSM transition is also a CAS UPDATE; if two paths race here, ErrStaleStatus
+// makes the second one a no-op.
+func reconcilePayrollStatus(tx *gorm.DB, orgID string, payroll models.Payroll) {
 	var failedCount int64
-	models.DB.Model(&models.PayrollItem{}).
+	tx.Model(&models.PayrollItem{}).
 		Where("payroll_id = ? AND status = ?", payroll.ID, models.PayrollFailed).
 		Count(&failedCount)
 
@@ -164,8 +206,12 @@ func reconcilePayrollStatus(payroll models.Payroll) {
 		newStatus = models.PayrollFailed
 	}
 
-	// FSM: processing → completed/failed.
-	if err := models.TransitionStatus(models.DB, &payroll, payroll.Status, newStatus); err != nil {
+	// FSM CAS: processing → completed/failed. A stale-status error means
+	// another path beat us to it — also idempotent success.
+	if err := models.TransitionStatus(tx, &payroll, payroll.Status, newStatus); err != nil {
+		if errors.Is(err, models.ErrStaleStatus) {
+			return
+		}
 		middleware.Logger.Error("payroll reconciliation FSM error",
 			"payroll_id", payroll.ID,
 			"error", err.Error(),
@@ -173,12 +219,12 @@ func reconcilePayrollStatus(payroll models.Payroll) {
 		return
 	}
 
-	// Audit the batch-level resolution.
-	models.AppendAudit(
-		"Payroll", payroll.ID, "reconciled",
-		string(payroll.Status), string(newStatus),
-		"internal", "",
-	)
+	// Audit the batch-level resolution inside the same tx.
+	if err := models.AppendAuditTx(tx, orgID, "Payroll", payroll.ID, "reconciled",
+		string(payroll.Status), string(newStatus), "internal", ""); err != nil {
+		middleware.Logger.Error("CRITICAL: reconciliation audit write failed",
+			"payroll_id", payroll.ID, "next", newStatus, "error", err.Error())
+	}
 
 	middleware.Logger.Info("payroll reconciled",
 		"payroll_id", payroll.ID,

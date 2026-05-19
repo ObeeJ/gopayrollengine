@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"go-payroll-engine/internal/models"
+	"go-payroll-engine/pkg/money"
 	"log"
 	"os"
 	"time"
@@ -36,12 +37,12 @@ type EvidenceSnapshot struct {
 }
 
 type payrollSummary struct {
-	ID          string  `json:"id"`
-	OrgID       string  `json:"org_id"`
-	Period      string  `json:"period"`
-	Status      string  `json:"status"`
-	TotalAmount float64 `json:"total_amount"`
-	ItemCount   int64   `json:"item_count"`
+	ID          string     `json:"id"`
+	OrgID       string     `json:"org_id"`
+	Period      string     `json:"period"`
+	Status      string     `json:"status"`
+	TotalAmount money.Kobo `json:"total_amount"`
+	ItemCount   int64      `json:"item_count"`
 }
 
 type accessPattern struct {

@@ -4,12 +4,17 @@ import (
 	"go-payroll-engine/internal/api/middleware"
 	"go-payroll-engine/internal/models"
 	"go-payroll-engine/internal/repository"
+	"go-payroll-engine/pkg/money"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
-// AdvanceHandler — worker-facing EWA endpoints; every query is fenced by employee_id from JWT.
+// AdvanceHandler — worker-facing EWA endpoints. Every query runs inside
+// models.WithOrgScope so the RLS policy partitions the worker's data away
+// from every other tenant's, even on queries that filter only by
+// employee_id (which can collide across orgs).
 type AdvanceHandler struct {
 	employeeRepo repository.EmployeeRepository
 }
@@ -19,12 +24,18 @@ func NewAdvanceHandler(er repository.EmployeeRepository) *AdvanceHandler {
 	return &AdvanceHandler{employeeRepo: er}
 }
 
-// GetEarnedWages handles GET /api/v1/worker/wages — returns the worker's accrued wage snapshot.
+// GetEarnedWages handles GET /api/v1/worker/wages — returns the worker's
+// accrued wage snapshot.
 func (h *AdvanceHandler) GetEarnedWages(c *gin.Context) {
 	employeeID := middleware.EmployeeID(c)
 	orgID := middleware.OrgID(c)
 
-	emp, err := h.employeeRepo.FindByID(orgID, employeeID)
+	var emp *models.Employee
+	err := models.WithOrgScope(c.Request.Context(), orgID, func(tx *gorm.DB) error {
+		var fetchErr error
+		emp, fetchErr = h.employeeRepo.WithTx(tx).FindByID(orgID, employeeID)
+		return fetchErr
+	})
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "employee record not found"})
 		return
@@ -38,11 +49,13 @@ func (h *AdvanceHandler) GetEarnedWages(c *gin.Context) {
 	})
 }
 
-// RequestAdvance handles POST /api/v1/worker/advances — creates an advance request.
+// RequestAdvance handles POST /api/v1/worker/advances — creates an advance
+// request. Advance + audit commit atomically; an audit failure rolls back
+// the advance so we never accept money work without an audit trail.
 func (h *AdvanceHandler) RequestAdvance(c *gin.Context) {
 	var req struct {
-		Amount float64 `json:"amount" binding:"required,gt=0"`
-		Reason string  `json:"reason" binding:"required"`
+		Amount money.Kobo `json:"amount" binding:"required,gt=0"`
+		Reason string     `json:"reason" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -60,21 +73,38 @@ func (h *AdvanceHandler) RequestAdvance(c *gin.Context) {
 		Status:     "pending",
 	}
 
-	if err := models.DB.Create(&advance).Error; err != nil {
+	if err := models.WithOrgScope(c.Request.Context(), orgID, func(tx *gorm.DB) error {
+		if err := tx.Create(&advance).Error; err != nil {
+			return err
+		}
+		return models.AppendAuditTx(tx, orgID, "AdvanceRequest", advance.ID, "created",
+			"", req.Reason, c.ClientIP(), "")
+	}); err != nil {
+		middleware.Logger.Error("advance create + audit failed", "org_id", orgID, "error", err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create advance request"})
 		return
 	}
 
-	models.AppendAudit("AdvanceRequest", advance.ID, "created", "", req.Reason, c.ClientIP(), "")
 	c.JSON(http.StatusAccepted, advance)
 }
 
-// GetAdvanceHistory handles GET /api/v1/worker/advances — worker sees only their own history.
+// GetAdvanceHistory handles GET /api/v1/worker/advances — worker sees only
+// their own history. RLS prevents an employee_id collision across orgs from
+// returning another tenant's data even if the filter were wrong.
 func (h *AdvanceHandler) GetAdvanceHistory(c *gin.Context) {
 	employeeID := middleware.EmployeeID(c)
+	orgID := middleware.OrgID(c)
 
 	var advances []models.AdvanceRequest
-	models.DB.Where("employee_id = ?", employeeID).Order("created_at desc").Find(&advances)
+	if err := models.WithOrgScope(c.Request.Context(), orgID, func(tx *gorm.DB) error {
+		return tx.Where("employee_id = ?", employeeID).
+			Order("created_at desc").
+			Find(&advances).Error
+	}); err != nil {
+		middleware.Logger.Error("advance history fetch failed", "org_id", orgID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load advance history"})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{"data": advances, "total": len(advances)})
 }

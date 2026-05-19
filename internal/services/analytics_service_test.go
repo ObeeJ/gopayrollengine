@@ -1,10 +1,11 @@
-// Package services_test contains unit tests for the analytics and webhook reconciliation logic.
-// Package services_test — unit tests using local helpers; no DB or Monnify required.
-// (computeRisk, resolvePayrollStatus) that mirror the production logic.
+// Package services_test contains unit tests for the analytics and webhook
+// reconciliation logic. Local helpers (computeRisk, resolvePayrollStatus)
+// mirror the production logic so they can be exercised without a DB or Monnify.
 package services
 
 import (
 	"go-payroll-engine/internal/models"
+	"go-payroll-engine/pkg/money"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,66 +13,71 @@ import (
 
 func TestPredictiveAnalytics_AverageCalculation(t *testing.T) {
 	payrolls := []models.Payroll{
-		{TotalAmount: 1000},
-		{TotalAmount: 2000},
-		{TotalAmount: 3000},
+		{TotalAmount: money.FromNaira(1000)},
+		{TotalAmount: money.FromNaira(2000)},
+		{TotalAmount: money.FromNaira(3000)},
 	}
 
-	var sum float64
+	var sum money.Kobo
 	for _, p := range payrolls {
-		sum += p.TotalAmount
+		next, err := sum.Add(p.TotalAmount)
+		assert.NoError(t, err)
+		sum = next
 	}
-	avg := sum / float64(len(payrolls))
+	avg, err := sum.Percent(1, int64(len(payrolls)))
+	assert.NoError(t, err)
 
-	assert.Equal(t, float64(2000), avg)
+	assert.Equal(t, money.FromNaira(2000), avg)
 }
 
 func TestRiskLevel_Low(t *testing.T) {
-	balance := 3000.0
-	predicted := 2000.0
+	balance := money.FromNaira(3000)
+	predicted := money.FromNaira(2000)
 	assert.Equal(t, "Low", computeRisk(balance, predicted))
 }
 
 func TestRiskLevel_Medium(t *testing.T) {
 	// balance is between predicted and predicted*1.2
-	balance := 2300.0
-	predicted := 2000.0
+	balance := money.FromNaira(2300)
+	predicted := money.FromNaira(2000)
 	assert.Equal(t, "Medium", computeRisk(balance, predicted))
 }
 
 func TestRiskLevel_High(t *testing.T) {
-	balance := 1500.0
-	predicted := 2000.0
+	balance := money.FromNaira(1500)
+	predicted := money.FromNaira(2000)
 	assert.Equal(t, "High", computeRisk(balance, predicted))
 }
 
 func TestRiskLevel_ExactlyAtPredicted(t *testing.T) {
 	// balance == predicted → Medium (not below predicted, but below predicted*1.2)
-	balance := 2000.0
-	predicted := 2000.0
+	balance := money.FromNaira(2000)
+	predicted := money.FromNaira(2000)
 	assert.Equal(t, "Medium", computeRisk(balance, predicted))
 }
 
 func TestRiskLevel_ExactlyAt120Percent(t *testing.T) {
 	// balance == predicted*1.2 → Low (just above the medium threshold)
-	balance := 2400.0
-	predicted := 2000.0
+	balance := money.FromNaira(2400)
+	predicted := money.FromNaira(2000)
 	assert.Equal(t, "Low", computeRisk(balance, predicted))
 }
 
 func TestPredictiveAnalytics_NoHistory_UsesEmployeeSalaries(t *testing.T) {
 	employees := []models.Employee{
-		{Salary: 100000},
-		{Salary: 200000},
-		{Salary: 150000},
+		{Salary: money.FromNaira(100000)},
+		{Salary: money.FromNaira(200000)},
+		{Salary: money.FromNaira(150000)},
 	}
 
-	var total float64
-	for _, e := range employees {
-		total += e.Salary
+	salaries := make([]money.Kobo, len(employees))
+	for i, e := range employees {
+		salaries[i] = e.Salary
 	}
+	total, err := money.Sum(salaries)
+	assert.NoError(t, err)
 
-	assert.Equal(t, float64(450000), total)
+	assert.Equal(t, money.FromNaira(450000), total)
 }
 
 func TestWebhookReconciliation_AllCompleted(t *testing.T) {
@@ -103,10 +109,16 @@ func TestWebhookReconciliation_StillPending(t *testing.T) {
 
 // computeRisk mirrors the logic in AnalyticsService.GetPredictiveCashFlow
 // extracted here so it can be unit-tested without a DB or Monnify dependency.
-func computeRisk(balance, predicted float64) string {
+// All arithmetic is integer Kobo with banker's rounded ×1.2 threshold.
+func computeRisk(balance, predicted money.Kobo) string {
 	if balance < predicted {
 		return "High"
-	} else if balance < predicted*1.2 {
+	}
+	mediumThreshold, err := predicted.Percent(120, 100)
+	if err != nil {
+		return "High"
+	}
+	if balance < mediumThreshold {
 		return "Medium"
 	}
 	return "Low"

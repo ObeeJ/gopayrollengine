@@ -23,7 +23,7 @@ func (h *PayrollHandler) CreatePayroll(c *gin.Context) {
 		return
 	}
 
-	payroll, err := h.Service.CreatePayroll(middleware.OrgID(c), req.Period)
+	payroll, err := h.Service.CreatePayroll(c.Request.Context(), middleware.OrgID(c), req.Period)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -34,7 +34,7 @@ func (h *PayrollHandler) CreatePayroll(c *gin.Context) {
 // GetPayroll — loads the batch and all its items via the service layer.
 func (h *PayrollHandler) GetPayroll(c *gin.Context) {
 	id := c.Param("id")
-	payroll, err := h.Service.GetPayroll(middleware.OrgID(c), id)
+	payroll, err := h.Service.GetPayroll(c.Request.Context(), middleware.OrgID(c), id)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "payroll not found"})
 		return

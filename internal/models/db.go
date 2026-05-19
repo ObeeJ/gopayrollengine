@@ -1,6 +1,7 @@
 package models
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -35,7 +36,15 @@ func InitDB() {
 		log.Fatal("DB connection refused — is Postgres running?", err)
 	}
 
-	runMigrations(dsn)
+	// Migrations need DDL privileges (CREATE TABLE, ALTER, etc.) the
+	// application role intentionally lacks. If MIGRATION_DATABASE_URL is set
+	// — typically pointing at the superuser — use it for the schema upgrade
+	// and then fall back to the unprivileged DSN for the running app.
+	migrationDSN := os.Getenv("MIGRATION_DATABASE_URL")
+	if migrationDSN == "" {
+		migrationDSN = dsn
+	}
+	runMigrations(migrationDSN)
 
 	fmt.Println("Database ready.")
 	DB = db
@@ -64,8 +73,33 @@ func runMigrations(dsn string) {
 	}
 }
 
-// ScopedDB — returns a DB instance pre-filtered to the caller's organization.
-// Every query that touches tenant data must go through here; raw models.DB is for migrations only.
+// ScopedDB returns a DB instance pre-filtered to the caller's organisation
+// via an explicit WHERE clause. This is the convention-based isolation path —
+// works without any DB-side configuration, but only holds if every developer
+// remembers to call it. New code should prefer WithOrgScope, which gets the
+// same isolation enforced structurally by Postgres RLS.
 func ScopedDB(orgID string) *gorm.DB {
 	return DB.Where("organization_id = ?", orgID)
+}
+
+// WithOrgScope runs fn inside a transaction whose Postgres session has
+// app.org_id set to orgID. The RLS policies defined in migration 000008 then
+// filter every SELECT/INSERT/UPDATE/DELETE to that org, regardless of whether
+// the application code remembers to add a WHERE clause. This is structural
+// tenant isolation: forgetting the filter yields zero rows, not a leak.
+//
+// Use this for any tenant-scoped operation that isn't already covered by the
+// repository layer (ad-hoc queries, batch jobs, cross-repo aggregates).
+// Wraps the work in a transaction because SET LOCAL is scoped to the
+// transaction — without that boundary the session variable would leak to the
+// next query the connection pool hands out.
+func WithOrgScope(ctx context.Context, orgID string, fn func(tx *gorm.DB) error) error {
+	return DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// set_config(name, value, is_local=true) is the parameterised form of
+		// SET LOCAL — accepts a $1 placeholder where SET LOCAL does not.
+		if err := tx.Exec("SELECT set_config('app.org_id', ?, true)", orgID).Error; err != nil {
+			return err
+		}
+		return fn(tx)
+	})
 }

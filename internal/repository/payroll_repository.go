@@ -14,6 +14,13 @@ func NewPayrollRepository(db *gorm.DB) PayrollRepository {
 	return &payrollRepo{db: db}
 }
 
+// WithTx returns the same repository bound to the supplied transaction so
+// queries inherit the caller's RLS scope (app.org_id) and the work commits
+// atomically with whatever else the caller is doing in the same tx.
+func (r *payrollRepo) WithTx(tx *gorm.DB) PayrollRepository {
+	return &payrollRepo{db: tx}
+}
+
 func (r *payrollRepo) Create(payroll *models.Payroll) error {
 	return r.db.Create(payroll).Error
 }
@@ -46,18 +53,25 @@ func (r *payrollRepo) UpdateStatus(payroll *models.Payroll, next models.PayrollS
 	return models.TransitionStatus(r.db, payroll, payroll.Status, next)
 }
 
-// DecrementPendingCount — atomically decrements the counter and returns the new value.
-// When it hits zero the caller knows reconciliation should run.
+// DecrementPendingCount atomically decrements the counter and returns the new
+// value in a single round-trip via UPDATE...RETURNING. The previous decrement-
+// then-SELECT implementation had a TOCTOU race: two concurrent webhooks could
+// both decrement and both observe zero, triggering double reconciliation.
+// RETURNING gives each caller a uniquely correct post-decrement value.
 func (r *payrollRepo) DecrementPendingCount(payrollID string) (int, error) {
-	if err := r.db.Model(&models.Payroll{}).Where("id = ?", payrollID).
-		UpdateColumn("pending_count", gorm.Expr("pending_count - 1")).Error; err != nil {
+	var newCount int
+	err := r.db.Raw(
+		`UPDATE payrolls
+		    SET pending_count = pending_count - 1,
+		        updated_at    = NOW()
+		  WHERE id = ?
+		RETURNING pending_count`,
+		payrollID,
+	).Scan(&newCount).Error
+	if err != nil {
 		return 0, err
 	}
-	var payroll models.Payroll
-	if err := r.db.Select("pending_count").First(&payroll, "id = ?", payrollID).Error; err != nil {
-		return 0, err
-	}
-	return payroll.PendingCount, nil
+	return newCount, nil
 }
 
 func (r *payrollRepo) UpdateItemStatus(item *models.PayrollItem, next models.PayrollStatus) error {

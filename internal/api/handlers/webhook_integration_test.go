@@ -53,9 +53,9 @@ func skipIfNoDB(t *testing.T) {
 // seedConcurrentBatch creates an org, payroll, and N items in 'processing'
 // state with pending_count = N. Mirrors the post-Monnify state immediately
 // before webhooks begin arriving.
-func seedConcurrentBatch(t *testing.T, n int) (orgID, payrollID string, itemIDs []string) {
+func seedConcurrentBatch(t *testing.T, n int) (payrollID string, itemIDs []string) {
 	t.Helper()
-	orgID = "ORG-" + uuid.New().String()[:8]
+	orgID := "ORG-" + uuid.New().String()[:8]
 	payrollID = "PAY-" + uuid.New().String()[:8]
 
 	require.NoError(t, models.DB.Exec(
@@ -145,7 +145,7 @@ func signedWebhookRequest(t *testing.T, itemID, eventType string) (*httptest.Res
 func TestWebhookConcurrency_ExactlyOneReconciliation(t *testing.T) {
 	skipIfNoDB(t)
 	const n = 25
-	_, payrollID, itemIDs := seedConcurrentBatch(t, n)
+	payrollID, itemIDs := seedConcurrentBatch(t, n)
 
 	h := &WebhookHandler{}
 

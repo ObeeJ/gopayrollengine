@@ -23,10 +23,10 @@ import (
 // counter to assert how many times the handler actually executed — the
 // load-bearing property of an idempotency lock is that two identical
 // requests in flight run the handler exactly once between them.
-func newTestIdempotencyRouter(t *testing.T) (*gin.Engine, *atomic.Int32, *miniredis.Miniredis) {
+func newTestIdempotencyRouter(t *testing.T) (*gin.Engine, *atomic.Int32) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	mr := miniredis.RunT(t)
+	mr := miniredis.RunT(t) // RunT registers cleanup; caller doesn't need the handle
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 
 	r := gin.New()
@@ -35,7 +35,7 @@ func newTestIdempotencyRouter(t *testing.T) (*gin.Engine, *atomic.Int32, *minire
 		hits.Add(1)
 		c.JSON(http.StatusCreated, gin.H{"hits": hits.Load()})
 	})
-	return r, &hits, mr
+	return r, &hits
 }
 
 func doPost(t *testing.T, r *gin.Engine, body string, idempotencyKey string) *httptest.ResponseRecorder {
@@ -54,7 +54,7 @@ func doPost(t *testing.T, r *gin.Engine, body string, idempotencyKey string) *ht
 // requests must carry an Idempotency-Key. Allowing missing keys would
 // quietly disable the protection.
 func TestIdempotency_MissingKeyRejected(t *testing.T) {
-	r, hits, _ := newTestIdempotencyRouter(t)
+	r, hits := newTestIdempotencyRouter(t)
 	w := doPost(t, r, `{}`, "")
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Equal(t, int32(0), hits.Load(), "handler must not run when the key is missing")
@@ -64,7 +64,7 @@ func TestIdempotency_MissingKeyRejected(t *testing.T) {
 // with the same key replays the cached response and does not re-execute the
 // handler — exactly one debit per (idempotency-key, account) pair.
 func TestIdempotency_CacheHitReplay(t *testing.T) {
-	r, hits, _ := newTestIdempotencyRouter(t)
+	r, hits := newTestIdempotencyRouter(t)
 
 	w1 := doPost(t, r, `{}`, "key-abc")
 	assert.Equal(t, http.StatusCreated, w1.Code)

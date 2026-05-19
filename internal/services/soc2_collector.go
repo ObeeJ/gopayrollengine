@@ -112,7 +112,7 @@ func (ec *EvidenceCollector) Collect(date time.Time) error {
 	}
 	var sm schemaMigration
 	models.DB.Raw("SELECT version, dirty FROM schema_migrations ORDER BY version DESC LIMIT 1").Scan(&sm)
-	snapshot.MigrationVersion = migrationVersion{Version: sm.Version, Dirty: sm.Dirty}
+	snapshot.MigrationVersion = migrationVersion(sm)
 
 	// Security checks — binary pass/fail assertions that auditors can verify.
 	snapshot.SecurityChecks = map[string]bool{

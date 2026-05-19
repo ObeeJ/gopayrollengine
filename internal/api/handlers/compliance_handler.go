@@ -71,7 +71,7 @@ func (h *ComplianceHandler) GetComplianceReport(c *gin.Context) {
 	}
 	var migration sm
 	models.DB.Raw("SELECT version, dirty FROM schema_migrations ORDER BY version DESC LIMIT 1").Scan(&migration)
-	report.MigrationVersion = migrationInfo{Version: migration.Version, Dirty: migration.Dirty}
+	report.MigrationVersion = migrationInfo(migration)
 
 	// Everything else runs under RLS scope; partial failure fails the whole report.
 	if err := models.WithOrgScope(c.Request.Context(), orgID, func(tx *gorm.DB) error {

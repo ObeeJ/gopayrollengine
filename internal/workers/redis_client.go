@@ -31,7 +31,7 @@ func InitRedisClient() {
 	defer cancel()
 
 	if err := RDB.Ping(ctx).Err(); err != nil {
-		log.Fatalf("FATAL: cannot connect to Redis at %s: %v", addr, err)
+		log.Fatalf("FATAL: cannot connect to Redis at %q: %v", addr, err)
 	}
 
 	log.Println("Redis client initialised.")

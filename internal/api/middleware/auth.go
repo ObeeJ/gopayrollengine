@@ -13,9 +13,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// Claims — the payload embedded in every JWT.
-// OrgID is set for employer tokens. EmployeeID is set for worker tokens.
-// They are mutually exclusive — a token is either an employer or a worker, never both.
+// Claims — JWT payload; OrgID for employers, EmployeeID for workers, never both.
 type Claims struct {
 	OrgID      string `json:"org_id"`
 	EmployeeID string `json:"employee_id"` // set only on worker tokens
@@ -52,8 +50,7 @@ func IssueToken(orgID, role string, ttl time.Duration) (string, error) {
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(jwtSecret)
 }
 
-// IssueWorkerToken — mints a signed JWT for a worker (employee app user).
-// EmployeeID is embedded so every query can be scoped to that specific worker.
+// IssueWorkerToken — mints a worker JWT with embedded employee_id for per-worker scoping.
 func IssueWorkerToken(orgID, employeeID string, ttl time.Duration) (string, error) {
 	claims := Claims{
 		OrgID:      orgID,
@@ -68,7 +65,6 @@ func IssueWorkerToken(orgID, employeeID string, ttl time.Duration) (string, erro
 }
 
 // JWTAuth — validates the Bearer token and injects org_id + role into context.
-// Replaces the single shared API key with per-tenant identity — no more APP_ORG_ID env var.
 func JWTAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
@@ -81,7 +77,7 @@ func JWTAuth() gin.HandlerFunc {
 
 		claims := &Claims{}
 		token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
-			// Reject tokens signed with anything other than HMAC — algorithm confusion attack prevention.
+			// Reject non-HMAC signatures — algorithm-confusion defence.
 			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, jwt.ErrSignatureInvalid
 			}
@@ -141,16 +137,14 @@ func Role(c *gin.Context) string {
 	return r
 }
 
-// EmployeeID — pulls the employee_id from context; only set on worker tokens.
-// Empty string means the caller is an employer, not a worker.
+// EmployeeID — worker's employee_id from ctx; empty means caller is an employer.
 func EmployeeID(c *gin.Context) string {
 	v, _ := c.Get("employee_id")
 	id, _ := v.(string)
 	return id
 }
 
-// RequireWorker — gate that only allows worker (employee) tokens through.
-// Prevents employers from hitting worker-only endpoints.
+// RequireWorker — gate that only lets worker tokens through.
 func RequireWorker() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if Role(c) != "employee" {
@@ -167,8 +161,7 @@ func RequireWorker() gin.HandlerFunc {
 	}
 }
 
-// RequireEmployer — gate that only allows employer (admin/viewer/compliance) tokens through.
-// Prevents workers from hitting employer-only endpoints.
+// RequireEmployer — gate that only lets employer tokens through.
 func RequireEmployer() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if Role(c) == "employee" {

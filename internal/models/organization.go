@@ -39,8 +39,7 @@ func (o *Organization) SetPassword(plain string) error {
 	return nil
 }
 
-// ConsentRecord — NDPR Article 26 compliance: every employee's data processing consent on record.
-// Append-only like AuditEvent — consent withdrawal creates a new row, never deletes the old one.
+// ConsentRecord — NDPR Art. 26; append-only, withdrawal creates a new row.
 type ConsentRecord struct {
 	ID             string    `gorm:"primaryKey" json:"id"`
 	OrganizationID string    `gorm:"index;not null" json:"organization_id"`
@@ -61,8 +60,7 @@ func (cr *ConsentRecord) BeforeCreate(tx *gorm.DB) (err error) {
 	return
 }
 
-// HasActiveConsent — checks if an employee has a current, non-expired consent for a given type.
-// Returns false if no record exists — no consent = no processing, full stop.
+// HasActiveConsent — true if a current, non-expired consent exists; absence means no processing.
 func HasActiveConsent(db *gorm.DB, orgID, employeeID, consentType string) bool {
 	var count int64
 	db.Model(&ConsentRecord{}).
@@ -72,8 +70,7 @@ func HasActiveConsent(db *gorm.DB, orgID, employeeID, consentType string) bool {
 	return count > 0
 }
 
-// BVNVerification — records the outcome of a BVN check at employee creation.
-// Stores the provider response hash, not the BVN itself — we verify, we don't hoard.
+// BVNVerification — outcome row from a BVN check; stores response hash, never the BVN itself.
 type BVNVerification struct {
 	ID             string    `gorm:"primaryKey" json:"id"`
 	OrganizationID string    `gorm:"index;not null" json:"organization_id"`

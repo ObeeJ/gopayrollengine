@@ -11,10 +11,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// AdvanceHandler — worker-facing EWA endpoints. Every query runs inside
-// models.WithOrgScope so the RLS policy partitions the worker's data away
-// from every other tenant's, even on queries that filter only by
-// employee_id (which can collide across orgs).
+// AdvanceHandler — worker-facing EWA endpoints, all scoped through RLS.
 type AdvanceHandler struct {
 	employeeRepo repository.EmployeeRepository
 }
@@ -24,8 +21,7 @@ func NewAdvanceHandler(er repository.EmployeeRepository) *AdvanceHandler {
 	return &AdvanceHandler{employeeRepo: er}
 }
 
-// GetEarnedWages handles GET /api/v1/worker/wages — returns the worker's
-// accrued wage snapshot.
+// GetEarnedWages — GET /api/v1/worker/wages; returns the worker's accrued snapshot.
 func (h *AdvanceHandler) GetEarnedWages(c *gin.Context) {
 	employeeID := middleware.EmployeeID(c)
 	orgID := middleware.OrgID(c)
@@ -49,9 +45,7 @@ func (h *AdvanceHandler) GetEarnedWages(c *gin.Context) {
 	})
 }
 
-// RequestAdvance handles POST /api/v1/worker/advances — creates an advance
-// request. Advance + audit commit atomically; an audit failure rolls back
-// the advance so we never accept money work without an audit trail.
+// RequestAdvance — POST /api/v1/worker/advances; advance + audit commit atomically or not at all.
 func (h *AdvanceHandler) RequestAdvance(c *gin.Context) {
 	var req struct {
 		Amount money.Kobo `json:"amount" binding:"required,gt=0"`
@@ -88,9 +82,7 @@ func (h *AdvanceHandler) RequestAdvance(c *gin.Context) {
 	c.JSON(http.StatusAccepted, advance)
 }
 
-// GetAdvanceHistory handles GET /api/v1/worker/advances — worker sees only
-// their own history. RLS prevents an employee_id collision across orgs from
-// returning another tenant's data even if the filter were wrong.
+// GetAdvanceHistory — GET /api/v1/worker/advances; worker's own history, RLS-fenced.
 func (h *AdvanceHandler) GetAdvanceHistory(c *gin.Context) {
 	employeeID := middleware.EmployeeID(c)
 	orgID := middleware.OrgID(c)

@@ -9,13 +9,10 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// RDB is the shared Redis client used by the idempotency middleware,
-// bloom filter, and any future Redis-backed features.
+// RDB — shared Redis client for idempotency, bloom, rate limiting, and whatever's next.
 var RDB *redis.Client
 
-// InitRedisClient initialises the shared Redis client and verifies
-// connectivity with a ping. Exits the process on failure — the app
-// cannot enforce idempotency or rate limits without Redis.
+// InitRedisClient — connects and pings; dies on failure because half the safety nets need Redis.
 func InitRedisClient() {
 	addr := os.Getenv("REDIS_URL")
 	if addr == "" {

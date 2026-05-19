@@ -12,11 +12,7 @@ import (
 
 type ConsentHandler struct{}
 
-// RecordConsent handles POST /api/v1/consent.
-// NDPR Article 26: records explicit employee consent before any data
-// processing begins. The consent insert and its audit row commit atomically
-// inside a single RLS-scoped transaction — an audit-write failure rolls back
-// the consent itself rather than leaving an unauditable change on disk.
+// RecordConsent — POST /api/v1/consent; NDPR Art. 26, consent + audit commit atomically.
 func (h *ConsentHandler) RecordConsent(c *gin.Context) {
 	var req struct {
 		EmployeeID  string     `json:"employee_id" binding:"required"`
@@ -56,10 +52,7 @@ func (h *ConsentHandler) RecordConsent(c *gin.Context) {
 	c.JSON(http.StatusCreated, record)
 }
 
-// GetConsent handles GET /api/v1/consent/:employee_id.
-// Returns the full consent history for an employee — the paper trail
-// regulators ask for. RLS bounds the result to the caller's org even if
-// employee_id collides with another tenant's employee.
+// GetConsent — GET /api/v1/consent/:employee_id; the paper trail regulators ask for, RLS-fenced.
 func (h *ConsentHandler) GetConsent(c *gin.Context) {
 	employeeID := c.Param("employee_id")
 	orgID := middleware.OrgID(c)

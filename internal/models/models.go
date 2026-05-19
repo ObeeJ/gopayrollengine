@@ -10,11 +10,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// Employee — the human behind the bank account number we're about to encrypt.
-// Email is stored as ciphertext (Wave 2 #2) and indexed via a deterministic
-// HMAC digest (EmailHMAC) so equality and uniqueness still work without
-// exposing plaintext at rest. Uniqueness is per-organisation (Wave 2 #1) so
-// tenant A cannot probe tenant B's employee directory.
+// Employee — encrypted PII with an HMAC blind-index on email for per-org uniqueness.
 type Employee struct {
 	ID             string          `gorm:"primaryKey" json:"id"`
 	OrganizationID string          `gorm:"index;not null" json:"organization_id"`
@@ -30,10 +26,7 @@ type Employee struct {
 	DeletedAt      gorm.DeletedAt  `gorm:"index" json:"-"`
 }
 
-// BeforeSave keeps EmailHMAC in sync with the plaintext Email value. Runs on
-// both create and update, so a tenant who legitimately rotates an employee's
-// email never ends up with a stale digest. Computed from the plaintext field
-// before GORM's Value() encrypts it.
+// BeforeSave — keeps EmailHMAC in sync with the plaintext Email before encryption.
 func (e *Employee) BeforeSave(tx *gorm.DB) error {
 	e.EmailHMAC = BlindIndex(string(e.Email))
 	return nil
@@ -57,24 +50,13 @@ const (
 	PayrollFailed     PayrollStatus = "failed"     // something went wrong, fix it
 )
 
-// ErrInvalidTransition — the requested move is not on the FSM graph (e.g.
-// completed → pending). Caller logic is wrong.
+// ErrInvalidTransition — the requested FSM move isn't on the graph; caller logic is wrong.
 var ErrInvalidTransition = fmt.Errorf("invalid payroll status transition")
 
-// ErrStaleStatus — the FSM move is legal on the graph but the row's *current*
-// status differs from what the caller passed. Caused by a concurrent writer
-// transitioning the row first (e.g. two webhooks for the same payroll item).
-// Callers that handle webhooks should treat this as idempotent success.
+// ErrStaleStatus — legal move, but a concurrent writer beat us; treat as idempotent success.
 var ErrStaleStatus = fmt.Errorf("stale status: row already transitioned by a concurrent writer")
 
-// validTransitions — the only legal moves on the payroll chessboard.
-//
-// failed → processing is permitted because Asynq retries the worker task on
-// transient failure; reloading the payroll from the DB shows status=failed and
-// the retry attempt would dead-letter forever without this edge. failed →
-// pending remains permitted for explicit human-initiated retries (e.g. an ops
-// dashboard "retry batch" button) that want to re-enter from the top of the
-// FSM rather than jump straight back into worker execution.
+// validTransitions — the only legal FSM edges; failed→processing exists so Asynq retries don't dead-letter.
 var validTransitions = map[PayrollStatus][]PayrollStatus{
 	PayrollPending:    {PayrollProcessing, PayrollFailed},
 	PayrollProcessing: {PayrollCompleted, PayrollFailed},
@@ -92,11 +74,7 @@ func CanTransition(from, to PayrollStatus) bool {
 	return false
 }
 
-// TransitionStatus moves a row through the FSM using a compare-and-swap UPDATE.
-// The WHERE clause pins the row to its expected current status; if a concurrent
-// writer has already transitioned it, RowsAffected is zero and ErrStaleStatus
-// is returned. This is the only way to make the FSM safe under concurrency —
-// a bare UPDATE without WHERE status=current is a TOCTOU hazard.
+// TransitionStatus — CAS UPDATE pinned to the expected current status; concurrent writers lose with ErrStaleStatus.
 func TransitionStatus(db *gorm.DB, model interface{}, current, next PayrollStatus) error {
 	if !CanTransition(current, next) {
 		return fmt.Errorf("%w: %s → %s", ErrInvalidTransition, current, next)
@@ -111,8 +89,7 @@ func TransitionStatus(db *gorm.DB, model interface{}, current, next PayrollStatu
 	return nil
 }
 
-// Payroll — the batch that signs the cheques (metaphorically; Monnify signs them literally).
-// PendingCount is an atomic counter so reconciliation fires exactly once, not 500 times.
+// Payroll — the batch; PendingCount is the atomic counter that makes reconciliation fire exactly once.
 type Payroll struct {
 	ID             string         `gorm:"primaryKey" json:"id"`
 	OrganizationID string         `gorm:"index;not null" json:"organization_id"`
@@ -134,8 +111,7 @@ func (p *Payroll) BeforeCreate(tx *gorm.DB) (err error) {
 	return
 }
 
-// PayrollItem — one employee's slice of the payroll pie.
-// TransactionReference links back to Monnify so webhooks know which item to update.
+// PayrollItem — one employee's slice; TransactionReference is the webhook's join key.
 type PayrollItem struct {
 	ID                   string         `gorm:"primaryKey" json:"id"`
 	OrganizationID       string         `gorm:"index;not null" json:"organization_id"`
@@ -159,8 +135,7 @@ func (pi *PayrollItem) BeforeCreate(tx *gorm.DB) (err error) {
 	return
 }
 
-// AuditEvent — the black box recorder; append-only, never updated, never deleted.
-// CBN, NDPR, and SOC 2 auditors will ask for this. You'll be glad it exists.
+// AuditEvent — append-only black box; CBN, NDPR, and SOC 2 will ask for it.
 type AuditEvent struct {
 	ID             string    `gorm:"primaryKey" json:"id"`
 	OrganizationID string    `gorm:"index" json:"organization_id"`
@@ -182,9 +157,7 @@ func (a *AuditEvent) BeforeCreate(tx *gorm.DB) (err error) {
 	return
 }
 
-// AppendAuditTx writes one audit record on the given transaction. Pass the
-// caller's organisation ID so the row is RLS-bound to the same tenant; an
-// empty orgID stores NULL so system-level events remain globally visible.
+// AppendAuditTx — writes one audit row on tx; empty orgID stores NULL for system-level events.
 func AppendAuditTx(tx *gorm.DB, orgID, entityType, entityID, action, before, after, actorIP, actorKey string) error {
 	return appendAuditOn(tx, orgID, entityType, entityID, action, before, after, actorIP, actorKey)
 }

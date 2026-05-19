@@ -10,20 +10,14 @@ import (
 	"gorm.io/gorm"
 )
 
-// demoOrgID is the tenant the seeder writes into. Stable so re-runs are idempotent
-// and so demo logins (which expect a specific org claim) line up with the data.
+// demoOrgID — stable tenant ID so re-runs are idempotent and demo logins line up.
 const demoOrgID = "ORG-DEMO-0001"
 
-// SeedDB populates the database with mock employees and 3 months of completed
-// payroll history. Every write runs inside models.WithOrgScope so the strict
-// RLS policies from migration 000010 accept the inserts and so the rows are
-// queryable through normal tenant-scoped reads afterwards.
+// SeedDB — drops mock employees and 3 months of payroll history into the demo org under RLS.
 func SeedDB() {
 	ctx := context.Background()
 
-	// 1. Demo organisation row. The organizations table is not yet covered by
-	// RLS, so a direct insert is fine — and it must happen before WithOrgScope
-	// because the policy's WITH CHECK references organization_id.
+	// Demo org row first — organizations isn't under RLS yet, and the policy's WITH CHECK depends on it.
 	if err := DB.Exec(
 		`INSERT INTO organizations (id, name, created_at, updated_at)
 		 VALUES (?, ?, NOW(), NOW())
@@ -43,8 +37,7 @@ func SeedDB() {
 	if err := WithOrgScope(ctx, demoOrgID, func(tx *gorm.DB) error {
 		for i := range employees {
 			emp := &employees[i]
-			// Lookup by the deterministic blind index — Email itself is now random-
-			// nonce ciphertext and equal plaintexts yield different stored values.
+			// Lookup by the blind index — Email ciphertext is random-nonce and not equality-comparable.
 			hmacDigest := BlindIndex(string(emp.Email))
 			if err := tx.Where("email_hmac = ?", hmacDigest).FirstOrCreate(emp).Error; err != nil {
 				log.Printf("Could not seed employee %s: %v", emp.Name, err)

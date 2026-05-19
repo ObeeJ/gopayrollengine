@@ -13,10 +13,7 @@ func NewEmployeeRepository(db *gorm.DB) EmployeeRepository {
 	return &employeeRepo{db: db}
 }
 
-// WithTx returns the same repository bound to a specific transaction so its
-// queries inherit any session-level state the caller has configured (e.g.
-// app.org_id under models.WithOrgScope). The returned value is a different
-// instance — the receiver is not mutated.
+// WithTx — returns the repo rebound to tx so its queries inherit the caller's RLS scope.
 func (r *employeeRepo) WithTx(tx *gorm.DB) EmployeeRepository {
 	return &employeeRepo{db: tx}
 }

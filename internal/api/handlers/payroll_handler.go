@@ -12,8 +12,7 @@ type PayrollHandler struct {
 	Service *services.PayrollService
 }
 
-// CreatePayroll — 202 because the money hasn't moved yet; the worker handles that part.
-// Only admin role can initiate payroll — viewers cannot.
+// CreatePayroll — admin-only; returns 202 because the worker actually moves the money.
 func (h *PayrollHandler) CreatePayroll(c *gin.Context) {
 	var req struct {
 		Period string `json:"period" binding:"required"`

@@ -5,10 +5,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-// All metrics are registered once at package init — promauto handles the registry boilerplate.
-// Naming convention: <namespace>_<subsystem>_<name>_<unit>
-// These are the exact metrics a SOC 2 auditor or CBN examiner will ask to see on a dashboard.
-
+// Metrics auditors and SREs will both want; named <namespace>_<subsystem>_<name>_<unit>.
 var (
 	// HTTP layer — answers "is the API healthy and how fast is it?"
 	HTTPRequestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{

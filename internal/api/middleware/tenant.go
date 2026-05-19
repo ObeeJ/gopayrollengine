@@ -9,8 +9,7 @@ import (
 
 const OrgIDKey = "org_id"
 
-// TenantMiddleware — confirms org_id from JWT is valid and loads the org's data region.
-// Aborts if org_id is missing or the org doesn't exist — no ghost tenants allowed.
+// TenantMiddleware — validates the JWT's org_id and loads its data region; no ghost tenants.
 func TenantMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		orgID := OrgID(c)

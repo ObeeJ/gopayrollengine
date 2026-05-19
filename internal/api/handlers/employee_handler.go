@@ -24,15 +24,7 @@ func NewEmployeeHandler(r repository.EmployeeRepository, b *services.BVNService)
 	return &EmployeeHandler{repo: r, bvnSvc: b}
 }
 
-// CreateEmployee — creates an employee; BVN verified, consent recorded, PII
-// encrypted. Only admin role can create employees — viewers are read-only.
-//
-// Employee insert, consent record, and audit row all commit atomically inside
-// a single RLS-scoped transaction. If anything fails, the partial state rolls
-// back — no orphaned employees with no consent record, no consent record
-// without an audit trail. BVN verification stays outside the tx because it's
-// an external Dojah call and a transient failure there shouldn't block the
-// employee creation (BVN status is reconciled out-of-band).
+// CreateEmployee — admin-only; employee + consent + audit commit atomically, BVN reconciles out-of-band.
 func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 	var req struct {
 		Name          string     `json:"name" binding:"required"`
@@ -82,9 +74,7 @@ func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 		return
 	}
 
-	// BVN check sits outside the transaction: external API call latency must
-	// not own the DB tx, and a transient Dojah failure should not roll back
-	// a fully valid local record.
+	// BVN check sits outside the tx — external latency and transient Dojah failures stay out of the DB.
 	if _, err := h.bvnSvc.VerifyBVN(orgID, emp.ID, req.BVN); err != nil {
 		middleware.Logger.Warn("BVN verification failed", "employee_id", emp.ID, "error", err.Error())
 	}
@@ -92,9 +82,7 @@ func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 	c.JSON(http.StatusCreated, emp)
 }
 
-// GetEmployees — paginated list scoped to the caller's org. RLS enforces the
-// tenant boundary structurally; the repo's explicit `WHERE organization_id`
-// is now redundant safety, not the load-bearing isolation.
+// GetEmployees — paginated list scoped to the caller's org; RLS is the load-bearing fence.
 func (h *EmployeeHandler) GetEmployees(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))

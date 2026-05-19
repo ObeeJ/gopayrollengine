@@ -14,8 +14,7 @@ import (
 	"time"
 )
 
-// httpTimeout is applied to every outbound Monnify HTTP call.
-// Prevents worker goroutines from hanging indefinitely on slow/unresponsive API.
+// httpTimeout — applied to every outbound Monnify call so slow APIs can't hang the worker.
 const httpTimeout = 30 * time.Second
 
 // walletNumberRe restricts wallet numbers to digits only, blocking URL injection.
@@ -35,9 +34,7 @@ type Client struct {
 	httpClient  *http.Client
 }
 
-// NewClient reads Monnify credentials from environment variables and returns a
-// configured Client. If MOCK_MODE=true, all API calls are short-circuited with
-// dummy responses so the system can be tested without real Monnify credentials.
+// NewClient — builds the Monnify client from env; MOCK_MODE=true short-circuits real calls.
 func NewClient() *Client {
 	return &Client{
 		Config: Config{
@@ -58,9 +55,7 @@ type AuthResponse struct {
 	} `json:"responseBody"`
 }
 
-// Authenticate obtains a Bearer token from Monnify using Basic auth (API key + secret).
-// It caches the token and skips re-authentication until the token expires,
-// reducing unnecessary round-trips on every API call.
+// Authenticate — fetches and caches the Monnify Bearer token until expiry.
 func (c *Client) Authenticate() error {
 	if c.MockMode {
 		// In mock mode, use a placeholder token — no real auth needed.
@@ -102,9 +97,7 @@ type BulkTransferRequest struct {
 	TransactionList           []TransferDetail `json:"transactionList"`
 }
 
-// TransferDetail is the wire format Monnify expects: amount in major-unit Naira
-// as a decimal float. Internal code stays in Kobo and converts at the boundary
-// via money.Kobo.Naira() when constructing this struct — never the other way.
+// TransferDetail — wire format Monnify wants: float Naira; we convert once at the boundary.
 type TransferDetail struct {
 	Amount        float64 `json:"amount"`
 	AccountNumber string  `json:"destinationAccountNumber"`
@@ -123,9 +116,7 @@ type BulkTransferResponse struct {
 	} `json:"responseBody"`
 }
 
-// InitiateBulkTransfer submits a batch of salary disbursements to Monnify.
-// Each entry in TransactionList maps to one PayrollItem. Monnify processes
-// them asynchronously and reports outcomes via webhook callbacks.
+// InitiateBulkTransfer — submits a batch of disbursements; outcomes arrive later via webhook.
 func (c *Client) InitiateBulkTransfer(payload BulkTransferRequest) (*BulkTransferResponse, error) {
 	start := time.Now()
 	defer func() {
@@ -177,9 +168,7 @@ type WalletBalanceResponse struct {
 	} `json:"responseBody"`
 }
 
-// GetWalletBalance fetches the current balance of the source wallet used for
-// disbursements. The Monnify response is a decimal Naira float; this method
-// converts it to Kobo at the boundary so callers never see a float for money.
+// GetWalletBalance — source wallet balance in Kobo; converts the upstream float at the boundary.
 func (c *Client) GetWalletBalance(walletNumber string) (money.Kobo, error) {
 	start := time.Now()
 	defer func() {

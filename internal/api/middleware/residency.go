@@ -8,9 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// allowedRegions — the set of data regions this instance is authorised to serve.
-// Set DATA_REGIONS=ng,eu to allow both; leave blank to allow all (dev only).
-// In production each deployment serves exactly one region — data never crosses borders.
+// allowedRegions — data regions this instance is authorised to serve; blank = allow all (dev only).
 var allowedRegions = func() map[string]bool {
 	regions := make(map[string]bool)
 	raw := os.Getenv("DATA_REGIONS")
@@ -23,9 +21,7 @@ var allowedRegions = func() map[string]bool {
 	return regions
 }()
 
-// DataResidency — rejects requests from orgs whose data_region doesn't match this deployment.
-// Prevents EU employee data from being processed on a Nigerian server and vice versa.
-// Must run after TenantMiddleware so the org's region is available in context.
+// DataResidency — rejects orgs whose data_region doesn't match this deployment; runs after TenantMiddleware.
 func DataResidency() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if len(allowedRegions) == 0 {

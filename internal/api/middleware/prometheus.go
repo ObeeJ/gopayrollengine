@@ -8,8 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// PrometheusMiddleware — records request count and latency for every route automatically.
-// Runs after the handler so it captures the final status code, not the initial one.
+// PrometheusMiddleware — records request count and latency per route; reads status after the handler.
 func PrometheusMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()

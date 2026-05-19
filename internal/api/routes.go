@@ -106,10 +106,7 @@ func SetupRouter() *gin.Engine {
 			}
 		}
 
-		// Worker routes — JWT → tenant → residency → worker gate → employee_id-scoped.
-		// TenantMiddleware enforces suspended-org rejection; DataResidency enforces
-		// region pinning. Without these, a worker in a suspended org or a foreign
-		// region could still hit EWA endpoints (Wave 2 #5).
+		// Worker routes — JWT → tenant → residency → worker gate; same fence as employer side.
 		worker := v1.Group("/worker")
 		worker.Use(middleware.JWTAuth())
 		worker.Use(middleware.TenantMiddleware())

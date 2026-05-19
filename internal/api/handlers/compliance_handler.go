@@ -54,16 +54,7 @@ type bvnSummary struct {
 	SuccessRate   float64 `json:"success_rate_pct"`
 }
 
-// GetComplianceReport handles GET /api/v1/compliance/report.
-// Requires role=compliance — not every admin should be able to pull this.
-// Returns a 30-day evidence bundle suitable for SOC 2 Type II and CBN examination.
-//
-// First handler migrated to models.WithOrgScope: every tenant-touching query
-// runs inside a transaction with `app.org_id` set, so the RLS policies from
-// migration 000008 enforce isolation at the database layer. A developer who
-// forgets a WHERE clause will see zero rows, not a cross-tenant leak. The
-// only queries that stay on the raw models.DB handle are the ones that read
-// non-tenant tables (schema_migrations) where RLS doesn't apply.
+// GetComplianceReport — GET /api/v1/compliance/report; 30-day SOC 2 / CBN evidence bundle, RLS-scoped.
 func (h *ComplianceHandler) GetComplianceReport(c *gin.Context) {
 	orgID := middleware.OrgID(c)
 	since := time.Now().AddDate(0, 0, -30)
@@ -73,8 +64,7 @@ func (h *ComplianceHandler) GetComplianceReport(c *gin.Context) {
 		Period:      since.Format("2006-01-02") + " to " + time.Now().Format("2006-01-02"),
 	}
 
-	// Migration version is global metadata — not tenant-scoped, read off the
-	// raw handle so it sidesteps the RLS transaction overhead.
+	// Migration version is global metadata — skip the RLS-scoped tx.
 	type sm struct {
 		Version int64
 		Dirty   bool
@@ -83,8 +73,7 @@ func (h *ComplianceHandler) GetComplianceReport(c *gin.Context) {
 	models.DB.Raw("SELECT version, dirty FROM schema_migrations ORDER BY version DESC LIMIT 1").Scan(&migration)
 	report.MigrationVersion = migrationInfo{Version: migration.Version, Dirty: migration.Dirty}
 
-	// Everything else runs under RLS scope. Errors here fail the request so
-	// auditors don't receive a half-built report.
+	// Everything else runs under RLS scope; partial failure fails the whole report.
 	if err := models.WithOrgScope(c.Request.Context(), orgID, func(tx *gorm.DB) error {
 		return h.populateOrgScopedSections(tx, &report, since)
 	}); err != nil {
@@ -110,12 +99,7 @@ func (h *ComplianceHandler) GetComplianceReport(c *gin.Context) {
 	c.JSON(http.StatusOK, report)
 }
 
-// populateOrgScopedSections fills every tenant-bound section of the report
-// using the RLS-scoped transaction. The queries no longer carry explicit
-// organization_id filters because the row-level policy applies them — a
-// regression where someone removes a WHERE clause cannot leak data, the
-// query just returns the same rows it should have. ScopedDB(orgID) is also
-// no longer used here; it was the convention-based path the policy replaces.
+// populateOrgScopedSections fills the tenant-bound sections — RLS supplies the org filter.
 func (h *ComplianceHandler) populateOrgScopedSections(tx *gorm.DB, report *complianceReport, since time.Time) error {
 	// Audit summary — proves every action is being logged.
 	var totalAudit int64

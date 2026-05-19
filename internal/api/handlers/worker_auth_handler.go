@@ -20,8 +20,7 @@ func NewWorkerAuthHandler(ur repository.UserRepository, er repository.EmployeeRe
 	return &WorkerAuthHandler{userRepo: ur, employeeRepo: er}
 }
 
-// WorkerLogin handles POST /api/v1/worker/auth/login.
-// Phone + OTP login; issues a JWT scoped to employee_id — workers see only their own data.
+// WorkerLogin — POST /api/v1/worker/auth/login; phone + OTP, issues employee-scoped JWT.
 func (h *WorkerAuthHandler) WorkerLogin(c *gin.Context) {
 	var req struct {
 		Phone string `json:"phone" binding:"required"`

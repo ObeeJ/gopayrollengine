@@ -10,8 +10,7 @@ import (
 	"time"
 )
 
-// EvidenceCollector — automated SOC 2 evidence snapshots; runs daily via cron or a scheduled task.
-// Produces JSON evidence files that auditors can verify without DB access.
+// EvidenceCollector — daily SOC 2 evidence snapshots in JSON; auditors don't need DB access.
 type EvidenceCollector struct {
 	outputDir string
 }
@@ -58,8 +57,7 @@ type migrationVersion struct {
 	Dirty   bool   `json:"dirty"`
 }
 
-// Collect — gathers evidence for the given date and writes it to a JSON file.
-// Call this from a daily cron job; the output directory should be backed up to S3.
+// Collect — writes one day of evidence to a JSON file; back the output dir up to S3.
 func (ec *EvidenceCollector) Collect(date time.Time) error {
 	dateStr := date.Format("2006-01-02")
 	startOfDay := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)

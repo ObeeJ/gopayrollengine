@@ -32,15 +32,7 @@ type MonnifyWebhookPayload struct {
 	} `json:"eventData"`
 }
 
-// HandleMonnifyWebhook handles POST /api/v1/webhooks/monnify.
-// Called by Monnify to report the outcome of each disbursement. Full flow:
-//  1. HMAC-SHA512 signature verification — rejects forged requests.
-//  2. Bloom filter check — O(1) probabilistic duplicate detection before any DB read.
-//  3. Parse and validate the event payload.
-//  4. DB idempotency check — terminal state guard for bloom filter false positives.
-//  5. FSM transition — validates the status change is legal before writing.
-//  6. Atomic counter decrement — reconciles parent Payroll in O(1) when counter hits zero.
-//  7. Audit log — appends an immutable record of every status change.
+// HandleMonnifyWebhook — verifies HMAC, dedupes via bloom + DB, transitions the item, reconciles the parent.
 func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 	secret := os.Getenv("MONNIFY_SECRET_KEY")
 	signature := c.GetHeader("monnify-signature")
@@ -74,8 +66,7 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 		return
 	}
 
-	// Step 2 (cont): Bloom filter — skip DB read entirely for probable duplicates.
-	// False positives (~1%) fall through to the DB idempotency check below.
+	// Bloom filter — probable duplicates skip the DB; ~1% false positives fall through.
 	if middleware.WebhookBloom != nil {
 		ctx := context.Background()
 		if seen, err := middleware.WebhookBloom.MightContain(ctx, ref); err == nil && seen {
@@ -84,13 +75,7 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 		}
 	}
 
-	// Step 3: Load the PayrollItem via the SECURITY DEFINER lookup function
-	// (migration 000011). We can't set app.org_id yet because we don't know the
-	// orgID until we've read the row, so a normal SELECT would be filtered to
-	// zero rows by the strict RLS policy on payroll_items. The lookup function
-	// bypasses RLS only for this single-UUID read — every other read/write on
-	// payroll_items goes through WithOrgScope. The HMAC check above proves the
-	// reference is authentic before we reach this point.
+	// SECURITY DEFINER lookup (migration 000011) — we don't know the orgID yet, HMAC already vouched for the ref.
 	var item models.PayrollItem
 	if err := models.DB.Raw(
 		"SELECT * FROM lookup_payroll_item_for_webhook(?)", ref,
@@ -118,8 +103,7 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 	}
 
 	if !models.CanTransition(item.Status, newStatus) {
-		// Log the illegal transition attempt but return 200 so Monnify
-		// does not keep retrying an unprocessable event.
+		// Log the illegal transition but return 200 so Monnify stops retrying.
 		middleware.Logger.Warn("illegal item status transition",
 			"item_id", item.ID,
 			"from", item.Status,
@@ -129,9 +113,7 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 		return
 	}
 
-	// Steps 5–7 run inside one RLS-scoped transaction so all writes for this
-	// webhook event are tenant-isolated and atomic. orgID comes from the item
-	// we just loaded — Monnify's HMAC proves the item reference is authentic.
+	// One RLS-scoped tx for transition + decrement + audit; orgID came from the just-loaded item.
 	orgID := item.OrganizationID
 	prevStatus := item.Status
 
@@ -145,9 +127,7 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 			return fmt.Errorf("item status update failed: %w", err)
 		}
 
-		// Step 6: Atomic decrement-and-read in one round-trip. UPDATE...RETURNING
-		// guarantees exactly one webhook observes pending_count=0 even under N
-		// concurrent webhooks — eliminates the decrement-then-SELECT TOCTOU race.
+		// UPDATE...RETURNING: exactly one webhook sees pending_count=0, no TOCTOU.
 		var post struct {
 			PendingCount int                  `gorm:"column:pending_count"`
 			Status       models.PayrollStatus `gorm:"column:status"`
@@ -169,10 +149,7 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 			})
 		}
 
-		// Step 7: Append immutable audit record inside the same tx. A failed
-		// audit here rolls back the entire tx (item transition + counter decrement),
-		// which is the safer trade-off than leaving half-audited state — Monnify
-		// will retry and we'll process the event again cleanly.
+		// Audit inside the same tx — failure rolls everything back and Monnify will retry.
 		return models.AppendAuditTx(tx, orgID, "PayrollItem", item.ID, "status_change",
 			string(prevStatus), string(newStatus), c.ClientIP(), "")
 	}); err != nil {
@@ -190,11 +167,7 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 	c.Status(http.StatusOK)
 }
 
-// reconcilePayrollStatus is called exactly once per payroll batch — when the
-// atomic pending_count counter reaches zero (guaranteed by UPDATE...RETURNING).
-// Runs inside the caller's RLS-scoped tx so the org boundary is already enforced.
-// The FSM transition is also a CAS UPDATE; if two paths race here, ErrStaleStatus
-// makes the second one a no-op.
+// reconcilePayrollStatus — called once per batch when pending_count hits zero; CAS UPDATE makes races a no-op.
 func reconcilePayrollStatus(tx *gorm.DB, orgID string, payroll models.Payroll) {
 	var failedCount int64
 	tx.Model(&models.PayrollItem{}).
@@ -206,8 +179,7 @@ func reconcilePayrollStatus(tx *gorm.DB, orgID string, payroll models.Payroll) {
 		newStatus = models.PayrollFailed
 	}
 
-	// FSM CAS: processing → completed/failed. A stale-status error means
-	// another path beat us to it — also idempotent success.
+	// FSM CAS: processing → completed/failed; stale status means someone beat us, also fine.
 	if err := models.TransitionStatus(tx, &payroll, payroll.Status, newStatus); err != nil {
 		if errors.Is(err, models.ErrStaleStatus) {
 			return

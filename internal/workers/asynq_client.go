@@ -9,8 +9,7 @@ import (
 
 var Client *asynq.Client
 
-// InitAsynqClient creates the global Asynq client used to enqueue background jobs.
-// Defaults to localhost:6379 if REDIS_URL is not set.
+// InitAsynqClient — creates the global Asynq client; defaults to localhost:6379.
 func InitAsynqClient() {
 	redisAddr := os.Getenv("REDIS_URL")
 	if redisAddr == "" {
@@ -24,8 +23,7 @@ func InitAsynqClient() {
 	log.Println("Asynq client initialized.")
 }
 
-// CloseAsynqClient flushes and closes the Asynq client connection.
-// Should be deferred in main to ensure clean shutdown.
+// CloseAsynqClient — flushes and closes the client; defer it in main.
 func CloseAsynqClient() {
 	if Client != nil {
 		Client.Close()

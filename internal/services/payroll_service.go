@@ -13,10 +13,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// PayrollService — the manager who knows payroll business rules. Delegates
-// all DB I/O to repositories; the only direct GORM contact is the explicit
-// RLS-scoped transaction owned at this layer so the header + all items
-// commit together inside the same tenant scope.
+// PayrollService — owns payroll business rules; the only direct GORM contact is the RLS-scoped tx.
 type PayrollService struct {
 	payrollRepo  repository.PayrollRepository
 	employeeRepo repository.EmployeeRepository
@@ -27,11 +24,7 @@ func NewPayrollService(pr repository.PayrollRepository, er repository.EmployeeRe
 	return &PayrollService{payrollRepo: pr, employeeRepo: er}
 }
 
-// CreatePayroll fetches active employees, builds the batch, commits the
-// header + every item atomically inside an RLS-scoped transaction, then
-// enqueues the worker task. Every DB read and write inside this method runs
-// under app.org_id = orgID, so a stale or wrong orgID can never accidentally
-// build a payroll out of another tenant's employees.
+// CreatePayroll builds and persists the batch under the org's RLS scope, then queues it for the worker.
 func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string) (*models.Payroll, error) {
 	payroll := models.Payroll{
 		OrganizationID: orgID,
@@ -82,9 +75,7 @@ func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string
 		return nil, err
 	}
 
-	// Enqueue happens after commit — a failed enqueue leaves the payroll in
-	// "pending" for manual or automated retry. The task payload carries the
-	// orgID so the worker can re-enter the RLS scope.
+	// Enqueue after commit; failed enqueue leaves status=pending for retry, payload carries orgID for RLS.
 	payload, _ := json.Marshal(map[string]string{"payroll_id": payroll.ID, "org_id": orgID})
 	task := asynq.NewTask(workers.TypeProcessPayroll, payload)
 	if _, err := workers.Client.Enqueue(task); err != nil {
@@ -94,8 +85,7 @@ func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string
 	return &payroll, nil
 }
 
-// GetPayroll fetches a payroll batch with all its items, RLS-scoped to the
-// caller's organisation.
+// GetPayroll — loads a batch with its items, RLS-scoped to the caller's org.
 func (s *PayrollService) GetPayroll(ctx context.Context, orgID, id string) (*models.Payroll, error) {
 	var payroll *models.Payroll
 	err := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {

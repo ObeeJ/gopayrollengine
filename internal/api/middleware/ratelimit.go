@@ -9,18 +9,10 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// rateLimiterCapacity caps the in-memory bucket map so a rotating-IP attacker
-// (one that cycles a new client IP per request) can't exhaust process memory.
-// At ~150 bytes per rate.Limiter, 50k entries ≈ 7.5 MB — generous for legit
-// traffic, hard cap against pathological clients. Least-recently-used buckets
-// are evicted automatically; an evicted key gets a fresh full burst on its
-// next request, which is a tolerable side effect for a value that was already
-// idle long enough to fall out.
+// rateLimiterCapacity — LRU cap so rotating-IP attackers can't OOM the process; ~7.5 MB at 50k entries.
 const rateLimiterCapacity = 50_000
 
-// tokenBucket holds a rate.Limiter per identity key in an LRU cache.
-// DSA: Token Bucket (per key, fixed burst refilling at a steady rate) backed
-// by an LRU map. The LRU bounds memory in O(1) amortised lookup/insert.
+// tokenBucket — per-identity rate.Limiter behind an LRU; O(1) lookup, bounded memory.
 type tokenBucket struct {
 	buckets *lru.Cache[string, *rate.Limiter]
 	r       rate.Limit // tokens per second
@@ -30,8 +22,7 @@ type tokenBucket struct {
 func newTokenBucket(capacity int, r rate.Limit, burst int) *tokenBucket {
 	cache, err := lru.New[string, *rate.Limiter](capacity)
 	if err != nil {
-		// lru.New only errors on capacity <= 0, which we control at the call
-		// site. A panic here is a programming error, not a runtime condition.
+		// lru.New only errors on capacity <= 0 — a programming bug, not runtime.
 		panic("ratelimit: " + err.Error())
 	}
 	return &tokenBucket{buckets: cache, r: r, burst: burst}
@@ -39,10 +30,7 @@ func newTokenBucket(capacity int, r rate.Limit, burst int) *tokenBucket {
 
 var globalBucket = newTokenBucket(rateLimiterCapacity, 10, 30) // 10 RPS sustained, burst 30
 
-// getLimiter returns the existing limiter for key or creates one — O(1).
-// The LRU's internal lock makes this safe under concurrent access; a brief
-// race where two callers both Add() yields one wasted limiter and one Get
-// that returns the loser's value, which is harmless.
+// getLimiter — returns or creates the limiter for key; safe under concurrent access.
 func (tb *tokenBucket) getLimiter(key string) *rate.Limiter {
 	if l, ok := tb.buckets.Get(key); ok {
 		return l
@@ -52,9 +40,7 @@ func (tb *tokenBucket) getLimiter(key string) *rate.Limiter {
 	return l
 }
 
-// RateLimit is a Gin middleware that enforces per-API-key token bucket rate limiting.
-// Falls back to per-IP limiting when no API key is present (e.g. the webhook endpoint).
-// Returns 429 with a Retry-After hint when the bucket is empty.
+// RateLimit — token-bucket per API key, falling back to per-IP; 429 with Retry-After when empty.
 func RateLimit() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Use API key as the bucket identity; fall back to IP for unauthenticated routes.

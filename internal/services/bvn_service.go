@@ -11,8 +11,7 @@ import (
 	"time"
 )
 
-// BVNService — verifies employee identity via BVN before any payroll data is created.
-// CBN requires KYC at onboarding; this is the minimum viable implementation.
+// BVNService — KYC at onboarding; the minimum viable BVN check CBN expects.
 type BVNService struct {
 	mockMode bool
 	apiKey   string
@@ -38,8 +37,7 @@ type dojahBVNResponse struct {
 	Error string `json:"error"`
 }
 
-// VerifyBVN — calls Dojah to confirm the BVN exists and belongs to a real person.
-// Stores a hash of the response (not the BVN) and records the outcome for audit.
+// VerifyBVN — checks via Dojah; records the response hash, not the BVN.
 func (s *BVNService) VerifyBVN(orgID, employeeID, bvn string) (*models.BVNVerification, error) {
 	if s.mockMode {
 		// Mock returns a successful verification — safe for dev and CI.

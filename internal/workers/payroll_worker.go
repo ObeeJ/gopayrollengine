@@ -37,10 +37,7 @@ func (h *PayrollHandler) ProcessPayrollTask(ctx context.Context, t *asynq.Task) 
 	orgID := payload["org_id"]
 	log.Printf("Processing payroll %s for org %s", payrollID, orgID)
 
-	// Phase 1: load payroll + items, atomically transition FSM + set counter,
-	// then load employees — all inside one RLS-scoped transaction. Every query
-	// here is automatically filtered to orgID by the Postgres RLS policy, so a
-	// rogue task cannot touch another tenant's rows even if payrollID collides.
+	// Phase 1 — load, CAS-transition, set counter, fetch employees in one RLS-scoped tx.
 	var payroll models.Payroll
 	var employees []models.Employee
 
@@ -49,20 +46,7 @@ func (h *PayrollHandler) ProcessPayrollTask(ctx context.Context, t *asynq.Task) 
 			return err
 		}
 
-		// FSM transition AND counter initialization happen as one atomic CAS,
-		// strictly BEFORE the Monnify call. This closes two related races:
-		//
-		//   1. Counter race: if pending_count were set only after Monnify accepts
-		//      the batch, webhooks arriving during the Monnify call would
-		//      decrement 0 → -1, then the worker's later overwrite to N would
-		//      discard those decrements — reconciliation would never fire.
-		//   2. Duplicate-task race: two Asynq workers picking up the same job
-		//      would both pass the FSM gate if it were a bare UPDATE; the CAS
-		//      WHERE status='pending' ensures only one wins.
-		// Accept pending OR failed as the source state. failed is the post-retry
-		// state — Asynq surfaces a transient worker error by retrying the task,
-		// which reloads the payroll from the DB. Without `failed` here, retries
-		// would dead-letter forever.
+		// Atomic FSM+counter CAS before Monnify call — closes counter race and duplicate-task race; failed is allowed for retries.
 		itemCount := len(payroll.Items)
 		res := tx.Exec(
 			`UPDATE payrolls
@@ -129,8 +113,7 @@ func (h *PayrollHandler) ProcessPayrollTask(ctx context.Context, t *asynq.Task) 
 
 	resp, err := h.MonnifyClient.InitiateBulkTransfer(bulkReq)
 	if err != nil {
-		// Failure transition is its own scoped call — the phase-1 tx already
-		// committed, so we open a fresh RLS scope to write the failed status.
+		// Phase-1 tx is committed; open a fresh RLS scope to mark failed.
 		models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error { //nolint:errcheck
 			return models.TransitionStatus(tx, &payroll, models.PayrollProcessing, models.PayrollFailed)
 		})
@@ -143,10 +126,7 @@ func (h *PayrollHandler) ProcessPayrollTask(ctx context.Context, t *asynq.Task) 
 		return fmt.Errorf("monnify said no: %s", resp.ResponseMessage)
 	}
 
-	// pending_count was already set atomically with the FSM transition above —
-	// nothing to do here. Webhooks that raced ahead of this point have already
-	// decremented from the correct starting value.
-
+	// pending_count was set atomically above — nothing more to do.
 	observability.PayrollProcessingDuration.WithLabelValues(orgID).Observe(time.Since(start).Seconds())
 	observability.WorkerTasksTotal.WithLabelValues(TypeProcessPayroll, "success").Inc()
 	observability.PayrollsCreatedTotal.WithLabelValues(orgID, "processing").Inc()

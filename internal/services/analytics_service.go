@@ -30,10 +30,7 @@ type PredictionResult struct {
 	Message         string     `json:"message"`
 }
 
-// GetPredictiveCashFlow — weighted sliding window forecast vs live wallet balance.
-// Weights [3,2,1] bias toward recent payrolls to catch salary growth trends early.
-// All arithmetic is integer Kobo; the only float comes from the Monnify wallet
-// balance response and is converted at the client boundary.
+// GetPredictiveCashFlow — weighted sliding-window forecast vs live wallet balance; integer Kobo throughout.
 func (s *AnalyticsService) GetPredictiveCashFlow(orgID string) (*PredictionResult, error) {
 	payrolls, err := s.payrollRepo.FindCompleted(orgID, 3)
 	if err != nil {
@@ -56,9 +53,7 @@ func (s *AnalyticsService) GetPredictiveCashFlow(orgID string) (*PredictionResul
 			return nil, fmt.Errorf("cold-start prediction overflow: %w", err)
 		}
 	} else {
-		// Weighted sliding window: most recent = weight 3, second = 2, oldest = 1.
-		// Computed as Σ(amount × weight) / Σ(weight) using overflow-checked
-		// integer arithmetic with banker's rounding on the final division.
+		// Weights [3,2,1] bias toward recent payrolls; overflow-checked integer math.
 		weights := []int64{3, 2, 1}
 		var weightedSum money.Kobo
 		var totalWeight int64

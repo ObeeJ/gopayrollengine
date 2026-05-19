@@ -1,14 +1,4 @@
-// Package money provides a safe, integer-based money type for the payroll system.
-//
-// Money is stored as Kobo (1/100 of a Naira), the smallest indivisible unit of
-// Nigerian currency. Floats are never used for monetary values because IEEE-754
-// arithmetic introduces rounding errors that compound across transactions —
-// catastrophic in any system that handles real funds.
-//
-// All arithmetic is integer arithmetic. JSON serialization emits an integer
-// number of kobo on the wire; clients are responsible for formatting for display.
-// Parsing from a Naira-decimal string (e.g. "1500.50") is supported for ingest
-// from spreadsheets and external APIs that still speak in major units.
+// Package money — integer Kobo arithmetic; floats are not invited.
 package money
 
 import (
@@ -21,9 +11,7 @@ import (
 	"strings"
 )
 
-// Kobo is the smallest unit of NGN (1/100 of a Naira). All monetary values in
-// the system are stored and computed in kobo. int64 gives a range of roughly
-// ±92 quadrillion kobo (±₦920 trillion) — more than sufficient.
+// Kobo — int64 minor units of NGN; the only money type the system trusts.
 type Kobo int64
 
 // KoboPerNaira is the conversion factor from major to minor units.
@@ -41,15 +29,12 @@ var ErrInvalidFormat = errors.New("money: invalid naira string format")
 // ErrOverflow is returned when an arithmetic operation would exceed int64 range.
 var ErrOverflow = errors.New("money: arithmetic overflow")
 
-// FromNaira constructs a Kobo value from a whole number of Naira.
-// FromNaira(1500) → 150000 kobo (₦1500.00).
+// FromNaira returns Kobo for a whole-Naira amount.
 func FromNaira(naira int64) Kobo {
 	return Kobo(naira * KoboPerNaira)
 }
 
-// FromNairaString parses a decimal Naira string (e.g. "1500.50", "1500", "0.99")
-// into Kobo. Returns ErrInvalidFormat for malformed input. Accepts at most two
-// fractional digits; "1500.555" is rejected to prevent silent rounding loss.
+// FromNairaString parses a decimal Naira string into Kobo — at most two fractional digits.
 func FromNairaString(s string) (Kobo, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -91,17 +76,12 @@ func FromNairaString(s string) (Kobo, error) {
 	return Kobo(total), nil
 }
 
-// Naira returns the value as a float64 number of Naira. Lossy by construction —
-// use only for display or for external APIs that demand a decimal naira number
-// (e.g. Monnify). Never use the result for further arithmetic.
+// Naira returns a lossy float64 view — display or external-API boundaries only.
 func (k Kobo) Naira() float64 {
 	return float64(k) / float64(KoboPerNaira)
 }
 
-// FromNairaFloat converts a float64 number of Naira to Kobo, rounding half away
-// from zero to the nearest kobo. Used only at boundaries where an upstream API
-// is float-typed (Monnify's wallet balance response). Internal code must never
-// touch float for money — call this once at the boundary and stay in Kobo.
+// FromNairaFloat — boundary helper for float-typed upstreams; rounds half-away-from-zero.
 func FromNairaFloat(f float64) Kobo {
 	if math.IsNaN(f) || math.IsInf(f, 0) {
 		return 0
@@ -122,7 +102,6 @@ func (k Kobo) String() string {
 	}
 	whole := int64(abs) / KoboPerNaira
 	frac := int64(abs) % KoboPerNaira
-
 	wholeStr := withThousandsSep(whole)
 	sign := ""
 	if negative {
@@ -192,12 +171,7 @@ func (k Kobo) MulInt(n int64) (Kobo, error) {
 	return Kobo(result), nil
 }
 
-// Percent returns k × (numerator/denominator), used for percentage calculations
-// like "40% of earned wages". Computes (k * numerator) first to preserve
-// precision, then divides. Uses banker's rounding (round half to even) to
-// minimize bias across many operations.
-//
-// Example: Kobo(9000000).Percent(40, 100) → 3600000 (₦36,000 = 40% of ₦90,000).
+// Percent returns k × num/denom with banker's rounding to keep long runs unbiased.
 func (k Kobo) Percent(numerator, denominator int64) (Kobo, error) {
 	if denominator == 0 {
 		return 0, errors.New("money: division by zero in Percent")
@@ -239,17 +213,12 @@ func (k Kobo) IsPositive() bool { return k > 0 }
 // IsNegative reports whether the amount is strictly less than zero.
 func (k Kobo) IsNegative() bool { return k < 0 }
 
-// MarshalJSON emits the value as an integer number of kobo. This is the
-// fintech-standard wire format — clients receive minor units and format for
-// display in their own locale.
+// MarshalJSON emits the value as an integer number of kobo — clients format for display.
 func (k Kobo) MarshalJSON() ([]byte, error) {
 	return []byte(strconv.FormatInt(int64(k), 10)), nil
 }
 
-// UnmarshalJSON accepts either an integer (kobo) or a decimal Naira string.
-// Numeric input is treated as kobo to preserve precision; strings are parsed
-// via FromNairaString. This dual format eases ingestion from heterogeneous
-// upstreams (mobile clients send integers, CSV imports send strings).
+// UnmarshalJSON accepts integer kobo or a decimal Naira string — floats are refused.
 func (k *Kobo) UnmarshalJSON(data []byte) error {
 	if len(data) == 0 {
 		return ErrInvalidFormat
@@ -297,15 +266,12 @@ func Sum(values []Kobo) (Kobo, error) {
 	return total, nil
 }
 
-// Value implements driver.Valuer so GORM persists Kobo as a BIGINT column.
-// The DB schema must use BIGINT (NOT NUMERIC) — see migration 000005.
+// Value implements driver.Valuer — Kobo persists as BIGINT (see migration 000005).
 func (k Kobo) Value() (driver.Value, error) {
 	return int64(k), nil
 }
 
-// Scan implements sql.Scanner so GORM reads BIGINT columns into Kobo.
-// Accepts int64, []byte, or string forms — different drivers report BIGINT
-// differently and the pgx/lib-pq pair has historically diverged here.
+// Scan implements sql.Scanner — accepts int64, []byte, or string because drivers disagree.
 func (k *Kobo) Scan(value interface{}) error {
 	if value == nil {
 		*k = 0

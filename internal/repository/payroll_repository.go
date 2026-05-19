@@ -14,9 +14,7 @@ func NewPayrollRepository(db *gorm.DB) PayrollRepository {
 	return &payrollRepo{db: db}
 }
 
-// WithTx returns the same repository bound to the supplied transaction so
-// queries inherit the caller's RLS scope (app.org_id) and the work commits
-// atomically with whatever else the caller is doing in the same tx.
+// WithTx — returns the repo rebound to tx so queries inherit the caller's RLS scope.
 func (r *payrollRepo) WithTx(tx *gorm.DB) PayrollRepository {
 	return &payrollRepo{db: tx}
 }
@@ -53,11 +51,7 @@ func (r *payrollRepo) UpdateStatus(payroll *models.Payroll, next models.PayrollS
 	return models.TransitionStatus(r.db, payroll, payroll.Status, next)
 }
 
-// DecrementPendingCount atomically decrements the counter and returns the new
-// value in a single round-trip via UPDATE...RETURNING. The previous decrement-
-// then-SELECT implementation had a TOCTOU race: two concurrent webhooks could
-// both decrement and both observe zero, triggering double reconciliation.
-// RETURNING gives each caller a uniquely correct post-decrement value.
+// DecrementPendingCount — UPDATE...RETURNING in one round-trip; no TOCTOU, no double reconcile.
 func (r *payrollRepo) DecrementPendingCount(payrollID string) (int, error) {
 	var newCount int
 	err := r.db.Raw(

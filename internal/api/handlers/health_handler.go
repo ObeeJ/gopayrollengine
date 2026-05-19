@@ -26,8 +26,7 @@ func (h *HealthHandler) Liveness(c *gin.Context) {
 	})
 }
 
-// Readiness handles GET /readyz — "is the process ready to serve traffic?"
-// Checks DB + Redis; fails gracefully so the load balancer drains this instance without a restart.
+// Readiness — GET /readyz; checks DB + Redis so the LB can drain a sick instance.
 func (h *HealthHandler) Readiness(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

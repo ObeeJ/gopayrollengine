@@ -14,27 +14,20 @@ import (
 	"os"
 )
 
-// kek is the Key Encryption Key loaded once at startup from ENCRYPTION_KEK.
-// In production, swap this for an AWS KMS data key — the interface stays the same.
+// kek — Key Encryption Key loaded once from ENCRYPTION_KEK; swap for KMS in prod.
 var kek []byte
 
-// hmacKey is a separate key used for deterministic blind-indexing of PII
-// fields that must remain queryable (e.g. email lookups, uniqueness). Using
-// the same key as the KEK would compromise both: HMAC outputs are stored
-// alongside ciphertext and an attacker with database read access could mount
-// a known-plaintext attack against the encryption key. Independent keys
-// preserve confidentiality even if one is exposed.
+// hmacKey — independent key for blind-indexing PII; sharing with KEK would compromise both.
 var hmacKey []byte
 
-// InitEncryption — loads the KEK and the blind-index HMAC key, or dies;
-// plaintext PII in prod is not an option.
+// InitEncryption — loads the KEK and the blind-index HMAC key, or dies trying.
 func InitEncryption() {
 	hexKey := os.Getenv("ENCRYPTION_KEK")
 	if hexKey == "" {
 		if os.Getenv("APP_ENV") == "production" {
 			log.Fatal("FATAL: ENCRYPTION_KEK is not set. Refusing to start in production.")
 		}
-		// Dev fallback — 32 zero bytes. Loud, obvious, never mistaken for real security.
+		// Dev fallback — 32 zero bytes; loud and obvious.
 		log.Println("WARNING: ENCRYPTION_KEK not set — using insecure dev key. Set it before going live.")
 		kek = make([]byte, 32)
 	} else {
@@ -61,11 +54,7 @@ func InitEncryption() {
 	hmacKey = decoded
 }
 
-// BlindIndex returns the HMAC-SHA256 digest of plaintext under the dedicated
-// HMAC key. Deterministic — equal plaintexts yield equal digests — so a column
-// of these supports equality lookups and unique constraints over otherwise
-// non-deterministic ciphertext. Used for the (org_id, email_hmac) unique index
-// and any future PII field that must remain searchable.
+// BlindIndex — deterministic HMAC-SHA256 digest; enables equality lookups over encrypted PII.
 func BlindIndex(plaintext string) []byte {
 	if plaintext == "" {
 		return nil
@@ -89,7 +78,7 @@ func encrypt(plaintext string) (string, error) {
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", err
 	}
-	// Nonce is prepended to ciphertext so Decrypt can extract it without a separate column.
+	// Prepend nonce to ciphertext so Decrypt can find it without a separate column.
 	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
@@ -120,7 +109,6 @@ func decrypt(encoded string) (string, error) {
 }
 
 // EncryptedString — a string that encrypts itself on the way into the DB and decrypts on the way out.
-// Drop it in any model field that holds PII; the rest of the code stays unchanged.
 type EncryptedString string
 
 // Value — called by GORM/database/sql before writing; encrypts the plaintext value.
@@ -153,23 +141,12 @@ func (e *EncryptedString) Scan(value interface{}) error {
 	return nil
 }
 
-// MarshalJSON returns a masked representation of the value — never the raw
-// plaintext. PII fields (account number, bank code, BVN, etc.) are
-// decrypted in-process so handlers can use them, but they MUST NOT travel
-// back out of the API in clear form. We expose at most the last four
-// characters so an authenticated user can still recognise their own record;
-// shorter values are fully masked.
-//
-// If a caller needs the plaintext (e.g. building a Monnify payload), call
-// .String() explicitly — that keeps the leak surface visible at the call site
-// rather than implicit in every JSON response.
+// MarshalJSON — emits a masked view; callers needing plaintext must call .String() explicitly.
 func (e EncryptedString) MarshalJSON() ([]byte, error) {
 	return []byte(`"` + maskPII(string(e)) + `"`), nil
 }
 
-// maskPII keeps the last four characters visible, replaces the rest with
-// asterisks, and fully masks values that are too short for the suffix to
-// retain any identifying value.
+// maskPII — keeps the last four characters; masks everything if there aren't five to spare.
 func maskPII(s string) string {
 	if len(s) == 0 {
 		return ""

@@ -6,10 +6,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// EmployeeRepository — the clerk who handles everything employee-shaped in the filing cabinet.
-// Services talk to this interface, never to GORM directly. WithTx returns a
-// repo bound to the supplied transaction, used by handlers running under
-// models.WithOrgScope so the repo's queries inherit the RLS session variable.
+// EmployeeRepository — services talk to this, not to GORM; WithTx rebinds to an RLS-scoped tx.
 type EmployeeRepository interface {
 	WithTx(tx *gorm.DB) EmployeeRepository
 	Create(emp *models.Employee) error
@@ -39,8 +36,7 @@ type OrganizationRepository interface {
 	Create(org *models.Organization) error
 }
 
-// UserRepository — the clerk who handles worker (employee-user) identity.
-// Workers are the humans who use EWA — distinct from the Employee payroll record.
+// UserRepository — worker (employee-user) identity; distinct from the Employee payroll record.
 type UserRepository interface {
 	Create(user *models.User) error
 	FindByEmployeeID(employeeID string) (*models.User, error)

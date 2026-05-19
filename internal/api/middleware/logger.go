@@ -9,9 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// piiFields is a Hash Set of JSON field names that must never appear in logs.
-// DSA: Hash Set (map[string]bool) — O(1) membership test per field name.
-// Extend this set as new PII fields are added to the data model.
+// piiFields — JSON field names that must never appear in logs; extend as the model grows.
 var piiFields = map[string]bool{
 	"account_number": true,
 	"bank_code":      true,
@@ -25,15 +23,12 @@ var piiFields = map[string]bool{
 	"authorization":  true,
 }
 
-// Logger is the global structured logger. JSON format for machine parsing
-// in CloudWatch, Datadog, or Grafana Loki.
+// Logger — global structured JSON logger for the usual aggregators to chew on.
 var Logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 	Level: slog.LevelInfo,
 }))
 
-// RequestLogger is a Gin middleware that emits one structured log line per
-// request. It injects a unique request_id into the Gin context so all
-// downstream log calls can be correlated in a log aggregator.
+// RequestLogger — one structured log line per request, with a request_id injected for correlation.
 func RequestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
@@ -45,8 +40,7 @@ func RequestLogger() gin.HandlerFunc {
 
 		c.Next()
 
-		// Emit one structured log line after the handler completes.
-		// Sensitive headers are never logged — only safe metadata.
+		// One log line per request; sensitive headers never make it in.
 		Logger.Info("request",
 			"request_id", requestID,
 			"method", c.Request.Method,
@@ -59,13 +53,7 @@ func RequestLogger() gin.HandlerFunc {
 	}
 }
 
-// RedactPII checks a field name against the PII hash set and returns
-// "[REDACTED]" if it matches, or the original value if safe.
-// Use this before logging any user-supplied or employee data.
-//
-// Example:
-//
-//	Logger.Info("employee", "account_number", RedactPII("account_number", emp.AccountNumber))
+// RedactPII — returns "[REDACTED]" for PII fields, the raw value otherwise.
 func RedactPII(field, value string) string {
 	if piiFields[field] {
 		return "[REDACTED]"

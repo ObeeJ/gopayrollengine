@@ -1,6 +1,7 @@
 package workers
 
-// TypeProcessPayroll — Asynq task type for payroll processing jobs; shared by enqueuer and handler.
+// Task type constants shared by enqueuers and handlers.
 const (
 	TypeProcessPayroll = "payroll:process"
+	TypeVerifyBVN      = "bvn:verify"
 )

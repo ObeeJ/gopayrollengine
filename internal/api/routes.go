@@ -38,12 +38,10 @@ func SetupRouter() *gin.Engine {
 	payrollRepo := repository.NewPayrollRepository(models.DB)
 	orgRepo     := repository.NewOrganizationRepository(models.DB)
 	userRepo    := repository.NewUserRepository(models.DB)
-	bvnSvc      := services.NewBVNService()
-
 	// Handlers — dependencies injected, no handler touches models.DB directly.
 	authHandler       := &handlers.AuthHandler{OrgRepo: orgRepo}
 	workerAuthHandler := handlers.NewWorkerAuthHandler(userRepo, empRepo)
-	empHandler        := handlers.NewEmployeeHandler(empRepo, bvnSvc)
+	empHandler        := handlers.NewEmployeeHandler(empRepo)
 	payrollHandler    := &handlers.PayrollHandler{Service: services.NewPayrollService(payrollRepo, empRepo)}
 	analyticsHandler  := &handlers.AnalyticsHandler{Service: services.NewAnalyticsService(payrollRepo, empRepo)}
 	advanceHandler    := handlers.NewAdvanceHandler(empRepo)

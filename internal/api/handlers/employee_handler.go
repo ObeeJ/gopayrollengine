@@ -4,7 +4,7 @@ import (
 	"go-payroll-engine/internal/api/middleware"
 	"go-payroll-engine/internal/models"
 	"go-payroll-engine/internal/repository"
-	"go-payroll-engine/internal/services"
+	"go-payroll-engine/internal/workers"
 	"go-payroll-engine/pkg/money"
 	"net/http"
 	"strconv"
@@ -15,13 +15,12 @@ import (
 )
 
 type EmployeeHandler struct {
-	repo   repository.EmployeeRepository
-	bvnSvc *services.BVNService
+	repo repository.EmployeeRepository
 }
 
-// NewEmployeeHandler — wires up the handler with its repository and BVN service.
-func NewEmployeeHandler(r repository.EmployeeRepository, b *services.BVNService) *EmployeeHandler {
-	return &EmployeeHandler{repo: r, bvnSvc: b}
+// NewEmployeeHandler — wires up the handler with its repository.
+func NewEmployeeHandler(r repository.EmployeeRepository) *EmployeeHandler {
+	return &EmployeeHandler{repo: r}
 }
 
 // CreateEmployee — admin-only; employee + consent + audit commit atomically, BVN reconciles out-of-band.
@@ -74,9 +73,9 @@ func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 		return
 	}
 
-	// BVN check sits outside the tx — external latency and transient Dojah failures stay out of the DB.
-	if _, err := h.bvnSvc.VerifyBVN(orgID, emp.ID, req.BVN); err != nil {
-		middleware.Logger.Warn("BVN verification failed", "employee_id", emp.ID, "error", err.Error())
+	// BVN check enqueued async — Dojah latency and transient failures don't block the response.
+	if err := workers.EnqueueBVNVerification(orgID, emp.ID, req.BVN); err != nil {
+		middleware.Logger.Warn("BVN enqueue failed", "employee_id", emp.ID, "error", err.Error())
 	}
 
 	c.JSON(http.StatusCreated, emp)

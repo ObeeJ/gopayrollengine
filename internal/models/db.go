@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
@@ -42,6 +43,15 @@ func InitDB() {
 		migrationDSN = dsn
 	}
 	runMigrations(migrationDSN)
+
+	// Cap connections so 500 concurrent webhooks can't exhaust postgres max_connections.
+	sqlDB, err := db.DB()
+	if err != nil {
+		log.Fatal("Failed to get underlying sql.DB:", err)
+	}
+	sqlDB.SetMaxOpenConns(25)
+	sqlDB.SetMaxIdleConns(10)
+	sqlDB.SetConnMaxLifetime(5 * time.Minute)
 
 	fmt.Println("Database ready.")
 	DB = db

@@ -107,8 +107,8 @@ func startWorker(redisAddr string) {
 	)
 
 	mux := asynq.NewServeMux()
-	handler := workers.NewPayrollHandler()
-	mux.HandleFunc(workers.TypeProcessPayroll, handler.ProcessPayrollTask)
+	mux.HandleFunc(workers.TypeProcessPayroll, workers.NewPayrollHandler().ProcessPayrollTask)
+	mux.HandleFunc(workers.TypeVerifyBVN, workers.NewBVNHandler().ProcessBVNTask)
 
 	log.Println("Worker server starting...")
 

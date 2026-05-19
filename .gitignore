@@ -42,3 +42,6 @@ grafana_data/
 prometheus_data/
 postgres_data/
 __pycache__/
+
+# ── Generated / one-shot scripts ──────────────────────────────────────────────
+write_tests.sh

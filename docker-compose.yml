@@ -1,3 +1,23 @@
+# docker-compose.yml
+#
+# Local stack: DB + Redis + API + Worker + observability sidecars.
+# Hardened in Wave 3 — every secret is required at runtime (no defaults that
+# silently become production credentials), Redis demands a password, the
+# application uses a NOSUPERUSER role so Postgres RLS policies bite, and the
+# init SQL provisions that role on first boot.
+#
+# Required environment variables (typically in a local .env file):
+#   POSTGRES_PASSWORD         — superuser password for the db container.
+#   POSTGRES_APP_PASSWORD     — payroll_app role password (NOSUPERUSER + RLS).
+#   REDIS_PASSWORD            — Redis AUTH password.
+#   GRAFANA_PASSWORD          — Grafana admin password.
+#   APP_API_KEY, JWT_SECRET, ENCRYPTION_KEK, ENCRYPTION_HMAC_KEY,
+#   MONNIFY_*                 — see .env.example.
+#
+# All `${VAR:?...}` substitutions cause docker compose to refuse to start if
+# the variable is unset — eliminates the failure mode where a developer ran
+# the stack with hard-coded defaults that ended up in production.
+
 services:
   db:
     image: postgres:15-alpine
@@ -6,10 +26,15 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: ${POSTGRES_DB:-payroll_db}
+      # Threaded into the init script so payroll_app gets a real password.
+      # Postgres entrypoint exports every POSTGRES_* var into the initdb env.
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD must be set}
     ports:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Runs once on a fresh data directory — provisions payroll_app role.
+      - ./config/postgres-init.sql:/docker-entrypoint-initdb.d/01-app-role.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 5s
@@ -19,16 +44,35 @@ services:
   redis:
     image: redis:7-alpine
     container_name: payroll_redis
+    # `--requirepass` enables Redis AUTH; without it the queue, bloom filter,
+    # and idempotency cache are world-readable to anything on the Docker
+    # network. `--protected-mode yes` is the belt to that bracer.
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+      - --protected-mode
+      - "yes"
     ports:
       - "6380:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test:
+        - "CMD"
+        - "redis-cli"
+        - "-a"
+        - "${REDIS_PASSWORD}"
+        - "ping"
       interval: 5s
       timeout: 5s
       retries: 5
 
   api:
-    build: .
+    build:
+      context: .
+      args:
+        VCS_REF: ${VCS_REF:-dev}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+        VERSION: ${VERSION:-dev}
     container_name: payroll_api
     depends_on:
       db:
@@ -40,15 +84,34 @@ services:
     environment:
       - APP_MODE=api
       - PORT=8080
-      - DATABASE_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-payroll_db}?sslmode=disable
+      # Application connects as payroll_app (NOSUPERUSER) so RLS policies
+      # apply. Migrations need DDL privileges payroll_app lacks, so they run
+      # as the postgres superuser via MIGRATION_DATABASE_URL — the binary
+      # reads that for the schema upgrade only, then switches to DATABASE_URL
+      # for runtime queries.
+      - DATABASE_URL=postgres://payroll_app:${POSTGRES_APP_PASSWORD}@db:5432/${POSTGRES_DB:-payroll_db}?sslmode=disable
+      - MIGRATION_DATABASE_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-payroll_db}?sslmode=disable
       - REDIS_URL=redis:6379
-      - MIGRATIONS_PATH=file://internal/db/migrations
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - MIGRATIONS_PATH=file:///internal/db/migrations
     ports:
-      - "8080:8080"
+      # 28080 on the host — picked to avoid clashes with the common dev
+      # defaults (8080, 8000, 3000). Container still listens on 8080 inside.
+      - "28080:8080"
     restart: unless-stopped
+    # Distroless image has no shell — no in-image healthcheck binary. The
+    # /healthz endpoint is the contract; rely on the orchestrator (k8s
+    # liveness/readiness probes, ECS health checks, load-balancer probes)
+    # to call it. Compose itself cannot HTTP-probe without shipping curl,
+    # which would defeat the point of the distroless base.
 
   worker:
-    build: .
+    build:
+      context: .
+      args:
+        VCS_REF: ${VCS_REF:-dev}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+        VERSION: ${VERSION:-dev}
     container_name: payroll_worker
     depends_on:
       db:
@@ -59,8 +122,11 @@ services:
       - .env
     environment:
       - APP_MODE=worker
-      - DATABASE_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-payroll_db}?sslmode=disable
+      - DATABASE_URL=postgres://payroll_app:${POSTGRES_APP_PASSWORD}@db:5432/${POSTGRES_DB:-payroll_db}?sslmode=disable
+      - MIGRATION_DATABASE_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-payroll_db}?sslmode=disable
       - REDIS_URL=redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - MIGRATIONS_PATH=file:///internal/db/migrations
     restart: unless-stopped
 
   # --- Observability stack ---
@@ -84,7 +150,9 @@ services:
     depends_on:
       - prometheus
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-changeme}
+      # No default — refuse to start without an admin password set. The
+      # previous "changeme" default was a Grafana CVE waiting to be reported.
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:?GRAFANA_PASSWORD must be set}
       - GF_USERS_ALLOW_SIGN_UP=false  # no self-registration in production
       - GF_SERVER_ROOT_URL=http://localhost:3000
     volumes:
@@ -94,12 +162,13 @@ services:
       - "3000:3000"
     restart: unless-stopped
 
-  # Redis exporter — exposes Redis metrics to Prometheus.
+  # Redis exporter — exposes Redis metrics to Prometheus. Authenticated.
   redis-exporter:
     image: oliver006/redis_exporter:v1.62.0
     container_name: payroll_redis_exporter
     environment:
       - REDIS_ADDR=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
     ports:
       - "9121:9121"
     depends_on:

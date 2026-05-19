@@ -17,7 +17,10 @@ func InitAsynqClient() {
 		redisAddr = "localhost:6379"
 	}
 
-	Client = asynq.NewClient(asynq.RedisClientOpt{Addr: redisAddr})
+	Client = asynq.NewClient(asynq.RedisClientOpt{
+		Addr:     redisAddr,
+		Password: os.Getenv("REDIS_PASSWORD"),
+	})
 	log.Println("Asynq client initialized.")
 }
 

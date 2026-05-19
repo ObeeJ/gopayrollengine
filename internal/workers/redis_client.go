@@ -24,6 +24,7 @@ func InitRedisClient() {
 
 	RDB = redis.NewClient(&redis.Options{
 		Addr:         addr,
+		Password:     os.Getenv("REDIS_PASSWORD"),
 		DialTimeout:  5 * time.Second,
 		ReadTimeout:  3 * time.Second,
 		WriteTimeout: 3 * time.Second,

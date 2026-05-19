@@ -1,0 +1,60 @@
+# .golangci.yml
+# Lint configuration for go-payroll-engine. Deliberately strict — this is a
+# FinTech codebase where a silently swallowed error or an unhandled context
+# cancellation is a money-losing bug, not a stylistic preference.
+
+run:
+  timeout: 5m
+  tests: true
+  build-tags:
+    - integration
+
+linters:
+  disable-all: true
+  enable:
+    # Core correctness
+    - govet              # what `go vet` runs, plus more
+    - staticcheck        # SA*, S*, ST* — the gold standard for Go static analysis
+    - errcheck           # unchecked errors — load-bearing in FinTech
+    - ineffassign        # ineffectual assignments
+    - unused             # dead code
+
+    # Concurrency
+    - bodyclose          # response.Body must be Closed
+    - rowserrcheck       # sql.Rows.Err() must be checked
+    - sqlclosecheck      # sql.Rows / sql.Stmt must be Closed
+
+    # Security
+    - gosec              # G-rule security advisories
+    - bidichk            # bidi rune injection (CVE-2021-42574)
+
+    # Hygiene
+    - misspell           # common typos in comments and strings
+    - unconvert          # unnecessary type conversions
+    - unparam            # unused function parameters (signals dead code paths)
+    - nilerr             # returning nil after testing err != nil
+    - errorlint          # %w usage; switch on errors.Is/As
+
+linters-settings:
+  gosec:
+    excludes:
+      # G115: integer overflow in conversion (false positives across int<->int64).
+      # We have money.Kobo with explicit overflow checks where it matters.
+      - G115
+  errcheck:
+    # Audit log writes already return errors via models.AppendAudit; ignoring
+    # the bloom-filter Add is intentional (advisory, not load-bearing).
+    exclude-functions:
+      - (*go-payroll-engine/internal/api/middleware.BloomFilter).Add
+      - (github.com/redis/go-redis/v9.Client).Del
+
+issues:
+  exclude-rules:
+    # Test files can defer body.Close() — readability beats strict err check.
+    - path: _test\.go
+      linters:
+        - bodyclose
+        - errcheck
+        - gosec
+  max-issues-per-linter: 0
+  max-same-issues: 0

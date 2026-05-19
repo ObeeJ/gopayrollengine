@@ -92,7 +92,10 @@ func startAPI(port string) {
 
 func startWorker(redisAddr string) {
 	srv := asynq.NewServer(
-		asynq.RedisClientOpt{Addr: redisAddr},
+		asynq.RedisClientOpt{
+			Addr:     redisAddr,
+			Password: os.Getenv("REDIS_PASSWORD"),
+		},
 		asynq.Config{
 			Concurrency: 10,
 			Queues: map[string]int{

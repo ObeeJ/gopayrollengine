@@ -1,7 +1,46 @@
+# Source control
 .git
-vendor
+.gitignore
+.gitattributes
+.github
+
+# Build artefacts
 payroll-app
+*.test
+*.out
+*.prof
+*.bench
+coverage.*
+
+# Local development
 .env
+.env.*
+*.local
+.vscode
+.idea
+
+# Docs and meta
+README.md
+LICENSE
+CHANGELOG.md
+docs/
+
+# Compose + docker meta (the build doesn't need them)
 Dockerfile
 docker-compose.yml
-README.md
+docker-compose.*.yml
+.dockerignore
+
+# Vendor dir — go mod download handles deps in-builder
+vendor
+
+# Test artefacts and scripts
+tests/
+write_tests.sh
+
+# Anything sensitive that might leak in
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx

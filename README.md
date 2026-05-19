@@ -165,8 +165,10 @@ HMAC-SHA512 webhook verification
 | Append-Only Log | `audit_events` table | Immutable record of every state change — no UPDATE, no DELETE |
 | Idempotency Map | `middleware/idempotency.go` | Network retry cannot create duplicate payroll batch |
 | Weighted Sliding Window | `services/analytics_service.go` | Cash flow forecast biased toward recent data |
-| Envelope Encryption | `models/encryption.go` | PII encrypted at rest, decrypted transparently on read |
-| DAG Tenant Scoping | `models/db.go` | Every query scoped to org — cross-tenant leakage structurally impossible |
+| Envelope Encryption | `models/encryption.go` | PII encrypted at rest, decrypted transparently on read; HMAC blind index for searchable email |
+| Postgres Row Level Security | `db/migrations/000008–000011` | Every tenant-scoped table enforces `organization_id = app.org_id` at the DB layer — a forgotten WHERE clause returns zero rows, not another tenant's data |
+| Money as Kobo (BIGINT) | `pkg/money/money.go` | All monetary values stored as int64 minor units — no float64 rounding, no silent precision loss |
+| FSM CAS Counter Init | `workers/payroll_worker.go` | Worker sets `status=processing` and `pending_count=N` in one atomic UPDATE — closes the race where webhooks arriving during the Monnify call would decrement from 0 |
 
 <br />
 
@@ -264,10 +266,10 @@ docker-compose up
 
 | Service | URL |
 |:---|:---|
-| API | http://localhost:8080 |
+| API | http://localhost:28080 |
 | Grafana | http://localhost:3000 |
 | Prometheus | http://localhost:9090 |
-| Metrics | http://localhost:8080/metrics |
+| Metrics | http://localhost:28080/metrics |
 
 <br />
 
@@ -288,12 +290,17 @@ cd go-payroll-engine
 
 # Configure
 cp .env.example .env
-# Edit .env — set JWT_SECRET, ENCRYPTION_KEK, MONNIFY credentials
+# Edit .env — set JWT_SECRET, ENCRYPTION_KEK (base64 32 bytes),
+# ENCRYPTION_HMAC_KEY (base64 32 bytes), MONNIFY credentials.
+# Generate keys: openssl rand -base64 32
 
-# Start infrastructure
+# Start infrastructure (Postgres on :5432, Redis on :6379)
 docker-compose up db redis -d
 
-# Seed database
+# Apply migrations — runs all up.sql files in order
+make migrate-up   # or: APP_MODE=api go run cmd/api/main.go (migrates on startup)
+
+# Seed database (creates ORG-DEMO-0001 with 3 employees + 3 months history)
 APP_MODE=seed go run cmd/api/main.go
 
 # Start API server
@@ -408,7 +415,7 @@ go-payroll-engine/
 │   │   ├── middleware/         # jwt, ratelimit, idempotency, bloom, residency, logger
 │   │   └── routes.go
 │   ├── db/
-│   │   └── migrations/         # 000001 → 000003 versioned SQL
+│   │   └── migrations/         # 000001 → 000011 versioned SQL (RLS, Kobo, encryption)
 │   ├── integrations/
 │   │   └── monnify/            # bulk transfer + wallet balance (mock-aware)
 │   ├── models/                 # GORM models, FSM, encryption, audit log
@@ -429,13 +436,26 @@ go-payroll-engine/
 
 <br />
 
-```bash
-# All tests with race detector
-go test ./... -race -count=1
+The `Makefile` wraps every step. Integration tests need a Postgres instance with all migrations applied; the targets below handle both.
 
-# With coverage report
-go test ./... -coverprofile=coverage.out && go tool cover -html=coverage.out
+```bash
+# Boot the test database (port 5433) and apply migrations
+make bootstrap
+
+# Unit tests only
+make test
+
+# Unit + integration (against the bootstrapped database)
+make test-integration
+
+# With race detector
+make test-race
+
+# Aggregate coverage
+make cover
 ```
+
+Integration tests are gated behind the `integration` build tag and live alongside the code they exercise (`*_integration_test.go`). They prove the RLS policy blocks cross-tenant reads/writes, the webhook handler reconciles exactly once under concurrent fire, and the worker initializes its counter before the Monnify call.
 
 <br />
 

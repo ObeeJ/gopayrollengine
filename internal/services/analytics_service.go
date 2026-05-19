@@ -80,7 +80,7 @@ func (s *AnalyticsService) GetPredictiveCashFlow(orgID string) (*PredictionResul
 	walletNumber := os.Getenv("MONNIFY_SOURCE_WALLET")
 	currentBalance, err := s.MonnifyClient.GetWalletBalance(walletNumber)
 	if err != nil {
-		return nil, fmt.Errorf("could not fetch balance: %v", err)
+		return nil, fmt.Errorf("could not fetch balance: %w", err)
 	}
 
 	// 120% threshold for "Medium" risk — banker's-rounded integer multiply.

@@ -2,6 +2,7 @@ package models
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -70,7 +71,7 @@ func runMigrations(dsn string) {
 	}
 	defer func() { _, _ = m.Close() }()
 
-	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		if os.Getenv("APP_ENV") == "production" {
 			log.Fatal("Migration failed in production — refusing to start with a dirty schema:", err)
 		}

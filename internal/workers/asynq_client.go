@@ -26,6 +26,8 @@ func InitAsynqClient() {
 // CloseAsynqClient — flushes and closes the client; defer it in main.
 func CloseAsynqClient() {
 	if Client != nil {
-		Client.Close()
+		if err := Client.Close(); err != nil {
+			log.Printf("asynq client close error: %v", err)
+		}
 	}
 }

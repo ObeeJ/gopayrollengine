@@ -161,7 +161,9 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 
 	// Mark this ref in the bloom filter so future duplicates skip the DB.
 	if middleware.WebhookBloom != nil {
-		middleware.WebhookBloom.Add(context.Background(), ref)
+		if err := middleware.WebhookBloom.Add(context.Background(), ref); err != nil {
+			middleware.Logger.Warn("bloom filter add failed", "ref", ref, "error", err.Error())
+		}
 	}
 
 	c.Status(http.StatusOK)

@@ -114,15 +114,19 @@ func (h *PayrollHandler) ProcessPayrollTask(ctx context.Context, t *asynq.Task) 
 	resp, err := h.MonnifyClient.InitiateBulkTransfer(bulkReq)
 	if err != nil {
 		// Phase-1 tx is committed; open a fresh RLS scope to mark failed.
-		models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error { //nolint:errcheck
+		if scopeErr := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
 			return models.TransitionStatus(tx, &payroll, models.PayrollProcessing, models.PayrollFailed)
-		})
+		}); scopeErr != nil {
+			log.Printf("payroll %s: failed to mark as failed after Monnify error: %v", payrollID, scopeErr)
+		}
 		return err
 	}
 	if !resp.RequestSuccessful {
-		models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error { //nolint:errcheck
+		if scopeErr := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
 			return models.TransitionStatus(tx, &payroll, models.PayrollProcessing, models.PayrollFailed)
-		})
+		}); scopeErr != nil {
+			log.Printf("payroll %s: failed to mark as failed after Monnify rejection: %v", payrollID, scopeErr)
+		}
 		return fmt.Errorf("monnify said no: %s", resp.ResponseMessage)
 	}
 

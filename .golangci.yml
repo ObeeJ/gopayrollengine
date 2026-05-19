@@ -41,10 +41,8 @@ linters:
         # money.Kobo has explicit overflow checks where it actually matters.
         - G115
     errcheck:
-      # Bloom Add is advisory (best-effort); Redis Del during idempotency cleanup
-      # is fire-and-forget — both intentionally not error-checked.
+      # Redis Del during idempotency cleanup is fire-and-forget; failure is non-critical.
       exclude-functions:
-        - (*go-payroll-engine/internal/api/middleware.BloomFilter).Add
         - (github.com/redis/go-redis/v9.Client).Del
 
   exclusions:

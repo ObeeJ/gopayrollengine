@@ -27,11 +27,11 @@ var WebhookBloom *BloomFilter
 // positions — k bit indices via double hashing: pos_i = (h1 + i*h2) mod m.
 func (bf *BloomFilter) positions(item string) []uint {
 	h1 := fnv.New64a()
-	h1.Write([]byte(item))
+	_, _ = h1.Write([]byte(item)) // hash.Hash.Write never returns a non-nil error
 	a := h1.Sum64()
 
 	h2 := fnv.New64()
-	h2.Write([]byte(item))
+	_, _ = h2.Write([]byte(item))
 	b := h2.Sum64()
 
 	positions := make([]uint, bf.k)

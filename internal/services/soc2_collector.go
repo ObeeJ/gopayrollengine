@@ -129,7 +129,7 @@ func (ec *EvidenceCollector) Collect(date time.Time) error {
 	}
 	filePath := fmt.Sprintf("%s/soc2-%s.json", ec.outputDir, dateStr)
 	data, _ := json.MarshalIndent(snapshot, "", "  ")
-	if err := os.WriteFile(filePath, data, 0640); err != nil {
+	if err := os.WriteFile(filePath, data, 0600); err != nil {
 		return fmt.Errorf("evidence write failed: %w", err)
 	}
 

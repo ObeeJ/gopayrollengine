@@ -79,7 +79,7 @@ func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string
 	payload, _ := json.Marshal(map[string]string{"payroll_id": payroll.ID, "org_id": orgID})
 	task := asynq.NewTask(workers.TypeProcessPayroll, payload)
 	if _, err := workers.Client.Enqueue(task); err != nil {
-		return nil, fmt.Errorf("payroll created but queue rejected it: %v", err)
+		return nil, fmt.Errorf("payroll created but queue rejected it: %w", err)
 	}
 
 	return &payroll, nil

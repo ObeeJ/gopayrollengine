@@ -7,7 +7,7 @@
 <div align="center">
 
 [![CI](https://github.com/ObeeJ/gopayrollengine/actions/workflows/ci.yml/badge.svg)](https://github.com/ObeeJ/gopayrollengine/actions)&nbsp;
-![Go](https://img.shields.io/badge/Go_1.22+-00ADD8?style=flat-square&logo=go&logoColor=white)&nbsp;
+![Go](https://img.shields.io/badge/Go_1.25+-00ADD8?style=flat-square&logo=go&logoColor=white)&nbsp;
 ![Postgres](https://img.shields.io/badge/PostgreSQL_15-4169E1?style=flat-square&logo=postgresql&logoColor=white)&nbsp;
 ![Redis](https://img.shields.io/badge/Redis_7-DC382D?style=flat-square&logo=redis&logoColor=white)&nbsp;
 ![License](https://img.shields.io/badge/MIT-white?style=flat-square)
@@ -50,8 +50,9 @@ The codebase is designed as a reference implementation of what production FinTec
   ┌─────────────────────────────────────────────────────┐
   │  API Layer                                          │
   │                                                     │
-  │  SecurityHeaders → BodyLimit → Logger → Metrics     │
-  │  RateLimit → JWTAuth → TenantScope → DataResidency  │
+  │  Global:    SecurityHeaders → BodyLimit → Logger    │
+  │             → Metrics → RateLimit → Recovery        │
+  │  Per group: JWTAuth → TenantScope → DataResidency   │
   └────────────────────────┬────────────────────────────┘
                            │
                            ▼
@@ -281,7 +282,7 @@ docker-compose up
 
 <br />
 
-**Prerequisites:** Go 1.22+, Docker, PostgreSQL 15, Redis 7
+**Prerequisites:** Go 1.25+, Docker, PostgreSQL 15, Redis 7
 
 ```bash
 # Clone
@@ -385,7 +386,7 @@ APP_MODE=worker go run cmd/api/main.go
 
 | Layer | Technology |
 |:---|:---|
-| Language | Go 1.22+ |
+| Language | Go 1.25+ |
 | Web framework | Gin |
 | ORM | GORM |
 | Background jobs | Asynq |
@@ -415,7 +416,7 @@ go-payroll-engine/
 │   │   ├── middleware/         # jwt, ratelimit, idempotency, bloom, residency, logger
 │   │   └── routes.go
 │   ├── db/
-│   │   └── migrations/         # 000001 → 000011 versioned SQL (RLS, Kobo, encryption)
+│   │   └── migrations/         # 000001 → 000012 versioned SQL (RLS, Kobo, encryption, indexes)
 │   ├── integrations/
 │   │   └── monnify/            # bulk transfer + wallet balance (mock-aware)
 │   ├── models/                 # GORM models, FSM, encryption, audit log

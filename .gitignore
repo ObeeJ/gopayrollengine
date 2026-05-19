@@ -41,3 +41,4 @@ Thumbs.db
 grafana_data/
 prometheus_data/
 postgres_data/
+__pycache__/

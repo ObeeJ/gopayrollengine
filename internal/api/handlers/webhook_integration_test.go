@@ -99,7 +99,7 @@ func seedConcurrentBatch(t *testing.T, n int) (payrollID string, itemIDs []strin
 		}).Error)
 		itemIDs[i] = itemID
 	}
-	return orgID, payrollID, itemIDs
+	return payrollID, itemIDs
 }
 
 // signedWebhookRequest builds a valid HMAC-signed Monnify webhook for itemID.
@@ -200,7 +200,7 @@ func TestWebhookConcurrency_ExactlyOneReconciliation(t *testing.T) {
 func TestWebhookConcurrency_DuplicateRefIsIdempotent(t *testing.T) {
 	skipIfNoDB(t)
 	const dupes = 20
-	_, payrollID, itemIDs := seedConcurrentBatch(t, 2)
+	payrollID, itemIDs := seedConcurrentBatch(t, 2)
 	target := itemIDs[0]
 
 	h := &WebhookHandler{}

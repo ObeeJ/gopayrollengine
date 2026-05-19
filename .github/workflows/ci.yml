@@ -45,9 +45,9 @@ jobs:
           args: --timeout=5m
 
       - name: gosec
-        uses: securego/gosec@v2.21.4
-        with:
-          args: -severity medium -confidence medium -exclude=G115 ./...
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec -severity medium -confidence medium -exclude=G115 ./...
 
       - name: govulncheck
         uses: golang/govulncheck-action@v1

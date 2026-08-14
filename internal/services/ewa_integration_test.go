@@ -40,6 +40,11 @@ func skipIfNoDB(t *testing.T) {
 }
 
 // seedWorker creates an org with one active salaried employee.
+// ngnMoney builds a whole-Naira Money for test readability.
+func ngnMoney(naira int64) money.Money {
+	return money.Money{Minor: naira * 100, Currency: money.NGN}
+}
+
 func seedWorker(t *testing.T, salary money.Kobo) (orgID, employeeID string) {
 	t.Helper()
 	orgID = "ORG-" + uuid.New().String()[:8]
@@ -71,9 +76,9 @@ func TestPostTransaction_BalancedPostingAndDerivedBalance(t *testing.T) {
 	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
 
 	err := models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
-		receivable, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable)
+		receivable, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable, money.NGN)
 		require.NoError(t, err)
-		cash, err := models.EnsureAccount(tx, orgID, "", models.AccountCashSettlement)
+		cash, err := models.EnsureAccount(tx, orgID, "", models.AccountCashSettlement, money.NGN)
 		require.NoError(t, err)
 
 		_, err = models.PostTransaction(tx, models.PostingRequest{
@@ -81,8 +86,8 @@ func TestPostTransaction_BalancedPostingAndDerivedBalance(t *testing.T) {
 			Kind:           "ewa_advance",
 			IdempotencyKey: "adv-1",
 			Entries: []models.EntryInput{
-				{AccountID: receivable.ID, Direction: models.Debit, Amount: money.FromNaira(20_000)},
-				{AccountID: cash.ID, Direction: models.Credit, Amount: money.FromNaira(20_000)},
+				{AccountID: receivable.ID, Direction: models.Debit, Amount: ngnMoney(20_000)},
+				{AccountID: cash.ID, Direction: models.Credit, Amount: ngnMoney(20_000)},
 			},
 		})
 		require.NoError(t, err)
@@ -90,12 +95,12 @@ func TestPostTransaction_BalancedPostingAndDerivedBalance(t *testing.T) {
 		// Balances are derived from entries, never read off a stored column.
 		recvBal, err := models.AccountBalance(tx, receivable.ID)
 		require.NoError(t, err)
-		assert.Equal(t, money.FromNaira(20_000), recvBal,
+		assert.Equal(t, ngnMoney(20_000), recvBal,
 			"debit-normal receivable should be positive after a debit")
 
 		cashBal, err := models.AccountBalance(tx, cash.ID)
 		require.NoError(t, err)
-		assert.Equal(t, money.FromNaira(20_000), cashBal,
+		assert.Equal(t, ngnMoney(20_000), cashBal,
 			"credit-normal cash account should be positive after a credit")
 		return nil
 	})
@@ -111,9 +116,9 @@ func TestPostTransaction_IsIdempotent(t *testing.T) {
 	post := func() string {
 		var txID string
 		require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
-			recv, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable)
+			recv, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable, money.NGN)
 			require.NoError(t, err)
-			cash, err := models.EnsureAccount(tx, orgID, "", models.AccountCashSettlement)
+			cash, err := models.EnsureAccount(tx, orgID, "", models.AccountCashSettlement, money.NGN)
 			require.NoError(t, err)
 
 			ltx, err := models.PostTransaction(tx, models.PostingRequest{
@@ -121,8 +126,8 @@ func TestPostTransaction_IsIdempotent(t *testing.T) {
 				Kind:           "ewa_advance",
 				IdempotencyKey: "same-key",
 				Entries: []models.EntryInput{
-					{AccountID: recv.ID, Direction: models.Debit, Amount: money.FromNaira(10_000)},
-					{AccountID: cash.ID, Direction: models.Credit, Amount: money.FromNaira(10_000)},
+					{AccountID: recv.ID, Direction: models.Debit, Amount: ngnMoney(10_000)},
+					{AccountID: cash.ID, Direction: models.Credit, Amount: ngnMoney(10_000)},
 				},
 			})
 			require.NoError(t, err)
@@ -149,9 +154,9 @@ func TestPostTransaction_UnbalancedIsRejectedByDatabase(t *testing.T) {
 	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
 
 	err := models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
-		recv, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable)
+		recv, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable, money.NGN)
 		require.NoError(t, err)
-		cash, err := models.EnsureAccount(tx, orgID, "", models.AccountCashSettlement)
+		cash, err := models.EnsureAccount(tx, orgID, "", models.AccountCashSettlement, money.NGN)
 		require.NoError(t, err)
 
 		ltx := models.LedgerTransaction{
@@ -163,9 +168,9 @@ func TestPostTransaction_UnbalancedIsRejectedByDatabase(t *testing.T) {
 		// Insert the entries directly, bypassing ValidatePosting entirely.
 		return tx.Create(&[]models.LedgerEntry{
 			{TransactionID: ltx.ID, AccountID: recv.ID, OrganizationID: orgID,
-				Direction: models.Debit, AmountKobo: money.FromNaira(20_000)},
+				Direction: models.Debit, AmountMinor: 20_000_00, Currency: money.NGN},
 			{TransactionID: ltx.ID, AccountID: cash.ID, OrganizationID: orgID,
-				Direction: models.Credit, AmountKobo: money.FromNaira(19_000)},
+				Direction: models.Credit, AmountMinor: 19_000_00, Currency: money.NGN},
 		}).Error
 	})
 
@@ -201,11 +206,11 @@ func TestRequestAdvance_ApprovedPostsLedgerAndCapsAtEarnings(t *testing.T) {
 	require.Equal(t, models.AdvanceApproved, advance.Status)
 
 	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
-		recv, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable)
+		recv, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable, money.NGN)
 		require.NoError(t, err)
 		bal, err := models.AccountBalance(tx, recv.ID)
 		require.NoError(t, err)
-		assert.Equal(t, el.MinimumDraw, bal, "the advance must appear as a receivable")
+		assert.Equal(t, money.NGNFromKobo(el.MinimumDraw), bal, "the advance must appear as a receivable")
 		return nil
 	}))
 }
@@ -297,11 +302,11 @@ func TestSettleAdvancesForPayrollItem_UndisbursedAdvanceIsCancelledNotDeducted(t
 	assert.Equal(t, models.AdvanceCancelled, after.Status)
 
 	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
-		recv, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable)
+		recv, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable, money.NGN)
 		require.NoError(t, err)
 		bal, err := models.AccountBalance(tx, recv.ID)
 		require.NoError(t, err)
-		assert.Equal(t, money.Zero, bal,
+		assert.Equal(t, ngnMoney(0), bal,
 			"the cancellation must reverse the original receivable")
 		return nil
 	}))
@@ -344,11 +349,11 @@ func TestSettleAdvancesForPayrollItem_RecoversTheAdvance(t *testing.T) {
 	assert.Equal(t, payrollItemID, *settled.SettledPayrollItemID)
 
 	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
-		recv, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable)
+		recv, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable, money.NGN)
 		require.NoError(t, err)
 		bal, err := models.AccountBalance(tx, recv.ID)
 		require.NoError(t, err)
-		assert.Equal(t, money.Zero, bal,
+		assert.Equal(t, ngnMoney(0), bal,
 			"after settlement the worker owes nothing — debit and credit cancel")
 		return nil
 	}))
@@ -385,11 +390,11 @@ func TestSettleAdvancesForPayrollItem_IsIdempotent(t *testing.T) {
 	assert.Equal(t, money.Zero, second, "a second settlement pass must withhold nothing")
 
 	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
-		recv, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable)
+		recv, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable, money.NGN)
 		require.NoError(t, err)
 		bal, err := models.AccountBalance(tx, recv.ID)
 		require.NoError(t, err)
-		assert.Equal(t, money.Zero, bal, "the receivable must not go negative")
+		assert.Equal(t, ngnMoney(0), bal, "the receivable must not go negative")
 		return nil
 	}))
 }

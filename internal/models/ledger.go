@@ -63,15 +63,16 @@ var (
 	ErrUnknownAccountType = errors.New("ledger: unknown account type")
 )
 
-// LedgerAccount — a bucket of value. Balances are never stored here.
+// LedgerAccount — a bucket of value in exactly one currency. Balances are
+// never stored here; they are derived by summing entries.
 type LedgerAccount struct {
-	ID             string      `gorm:"primaryKey" json:"id"`
-	OrganizationID string      `gorm:"index;not null" json:"organization_id"`
-	EmployeeID     *string     `json:"employee_id,omitempty"`
-	AccountType    AccountType `gorm:"not null" json:"account_type"`
-	NormalBalance  Direction   `gorm:"not null" json:"normal_balance"`
-	Currency       string      `gorm:"default:NGN" json:"currency"`
-	CreatedAt      time.Time   `json:"created_at"`
+	ID             string         `gorm:"primaryKey" json:"id"`
+	OrganizationID string         `gorm:"index;not null" json:"organization_id"`
+	EmployeeID     *string        `json:"employee_id,omitempty"`
+	AccountType    AccountType    `gorm:"not null" json:"account_type"`
+	NormalBalance  Direction      `gorm:"not null" json:"normal_balance"`
+	Currency       money.Currency `gorm:"not null" json:"currency"`
+	CreatedAt      time.Time      `json:"created_at"`
 }
 
 func (LedgerAccount) TableName() string { return "ledger_accounts" }
@@ -105,26 +106,37 @@ func (t *LedgerTransaction) BeforeCreate(tx *gorm.DB) error {
 }
 
 // LedgerEntry — one debit or credit line. Append-only; enforced by trigger.
+// AmountMinor is a count of Currency's minor unit, never a bare integer: the
+// column name predates multi-currency and is kept to avoid burying the currency
+// invariant inside a rename.
 type LedgerEntry struct {
-	ID             int64      `gorm:"primaryKey;autoIncrement" json:"id"`
-	TransactionID  string     `gorm:"index;not null" json:"transaction_id"`
-	AccountID      string     `gorm:"index;not null" json:"account_id"`
-	OrganizationID string     `gorm:"index;not null" json:"organization_id"`
-	Direction      Direction  `gorm:"not null" json:"direction"`
-	AmountKobo     money.Kobo `gorm:"column:amount_kobo;type:bigint;not null" json:"amount_kobo"`
-	CreatedAt      time.Time  `json:"created_at"`
+	ID             int64          `gorm:"primaryKey;autoIncrement" json:"id"`
+	TransactionID  string         `gorm:"index;not null" json:"transaction_id"`
+	AccountID      string         `gorm:"index;not null" json:"account_id"`
+	OrganizationID string         `gorm:"index;not null" json:"organization_id"`
+	Direction      Direction      `gorm:"not null" json:"direction"`
+	AmountMinor    int64          `gorm:"column:amount_kobo;type:bigint;not null" json:"amount_minor"`
+	Currency       money.Currency `gorm:"not null" json:"currency"`
+	CreatedAt      time.Time      `json:"created_at"`
 }
 
 func (LedgerEntry) TableName() string { return "ledger_entries" }
 
-// EntryInput — one line of a posting request.
+// Money reconstitutes the entry's amount as a currency-qualified value.
+func (e LedgerEntry) Money() money.Money {
+	return money.Money{Minor: e.AmountMinor, Currency: e.Currency}
+}
+
+// EntryInput — one line of a posting request. Amount carries its own currency,
+// which is what lets the validator reject a mixed-currency posting before it
+// ever reaches the database.
 type EntryInput struct {
 	AccountID string
 	Direction Direction
-	Amount    money.Kobo
+	Amount    money.Money
 }
 
-// PostingRequest — a complete, balanced movement of value.
+// PostingRequest — a complete, balanced, single-currency movement of value.
 type PostingRequest struct {
 	OrgID string
 	Kind  string
@@ -151,8 +163,23 @@ func ValidatePosting(req PostingRequest) error {
 		return ErrNoEntries
 	}
 
-	var debits, credits money.Kobo
+	// Every entry must share one currency. Summing across currencies is
+	// meaningless, so this is checked before any arithmetic happens rather than
+	// letting a mixed posting produce a plausible-looking total.
+	currency := req.Entries[0].Amount.Currency
+	if !currency.IsValid() {
+		return fmt.Errorf("%w: %q", money.ErrUnknownCurrency, currency)
+	}
+
+	debits := money.Money{Currency: currency}
+	credits := money.Money{Currency: currency}
+
 	for _, e := range req.Entries {
+		if e.Amount.Currency != currency {
+			return fmt.Errorf(
+				"%w: transaction mixes %s and %s; cross-currency movement must be posted as separate single-currency transactions",
+				money.ErrCurrencyMismatch, currency, e.Amount.Currency)
+		}
 		if !e.Amount.IsPositive() {
 			return fmt.Errorf("%w: got %s", ErrNonPositiveAmount, e.Amount)
 		}
@@ -169,7 +196,7 @@ func ValidatePosting(req PostingRequest) error {
 			return fmt.Errorf("ledger: total overflow: %w", err)
 		}
 	}
-	if debits != credits {
+	if debits.Minor != credits.Minor {
 		return fmt.Errorf("%w: debits=%s credits=%s", ErrUnbalanced, debits, credits)
 	}
 	return nil
@@ -217,7 +244,8 @@ func PostTransaction(tx *gorm.DB, req PostingRequest) (*LedgerTransaction, error
 			AccountID:      e.AccountID,
 			OrganizationID: req.OrgID,
 			Direction:      e.Direction,
-			AmountKobo:     e.Amount,
+			AmountMinor:    e.Amount.Minor,
+			Currency:       e.Amount.Currency,
 		})
 	}
 	if err := tx.Create(&entries).Error; err != nil {
@@ -227,15 +255,24 @@ func PostTransaction(tx *gorm.DB, req PostingRequest) (*LedgerTransaction, error
 	return &ltx, nil
 }
 
-// EnsureAccount returns the account for (org, employee, type), creating it on
-// first use. employeeID may be empty for org-level accounts.
-func EnsureAccount(tx *gorm.DB, orgID, employeeID string, at AccountType) (*LedgerAccount, error) {
+// EnsureAccount returns the account for (org, employee, type, currency),
+// creating it on first use. employeeID may be empty for org-level accounts.
+//
+// Currency is part of the account's identity, not a property of it: a worker
+// holding both NGN and USD has two receivable accounts, because one account
+// cannot have a meaningful balance in two currencies.
+func EnsureAccount(
+	tx *gorm.DB, orgID, employeeID string, at AccountType, currency money.Currency,
+) (*LedgerAccount, error) {
 	normal, ok := normalBalances[at]
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrUnknownAccountType, at)
 	}
+	if !currency.IsValid() {
+		return nil, fmt.Errorf("%w: %q", money.ErrUnknownCurrency, currency)
+	}
 
-	q := tx.Where("organization_id = ? AND account_type = ?", orgID, at)
+	q := tx.Where("organization_id = ? AND account_type = ? AND currency = ?", orgID, at, currency)
 	if employeeID == "" {
 		q = q.Where("employee_id IS NULL")
 	} else {
@@ -255,7 +292,7 @@ func EnsureAccount(tx *gorm.DB, orgID, employeeID string, at AccountType) (*Ledg
 		OrganizationID: orgID,
 		AccountType:    at,
 		NormalBalance:  normal,
-		Currency:       "NGN",
+		Currency:       currency,
 	}
 	if employeeID != "" {
 		acct.EmployeeID = &employeeID
@@ -267,12 +304,13 @@ func EnsureAccount(tx *gorm.DB, orgID, employeeID string, at AccountType) (*Ledg
 }
 
 // AccountBalance derives the balance by summing entries — never by reading a
-// stored total. Returned in the account's normal direction, so a debit-normal
-// account with more debits than credits reports a positive balance.
-func AccountBalance(tx *gorm.DB, accountID string) (money.Kobo, error) {
+// stored total. Returned in the account's normal direction and its own
+// currency, so a debit-normal account with more debits than credits reports a
+// positive balance.
+func AccountBalance(tx *gorm.DB, accountID string) (money.Money, error) {
 	var acct LedgerAccount
 	if err := tx.First(&acct, "id = ?", accountID).Error; err != nil {
-		return 0, err
+		return money.Money{}, err
 	}
 
 	var row struct {
@@ -284,11 +322,12 @@ func AccountBalance(tx *gorm.DB, accountID string) (money.Kobo, error) {
 		        COALESCE(SUM(amount_kobo) FILTER (WHERE direction = 'credit'), 0) AS credits`).
 		Where("account_id = ?", accountID).
 		Scan(&row).Error; err != nil {
-		return 0, err
+		return money.Money{}, err
 	}
 
+	balance := row.Credits - row.Debits
 	if acct.NormalBalance == Debit {
-		return money.Kobo(row.Debits - row.Credits), nil
+		balance = row.Debits - row.Credits
 	}
-	return money.Kobo(row.Credits - row.Debits), nil
+	return money.Money{Minor: balance, Currency: acct.Currency}, nil
 }

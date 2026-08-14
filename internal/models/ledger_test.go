@@ -10,7 +10,12 @@ import (
 )
 
 func entry(account string, dir Direction, naira int64) EntryInput {
-	return EntryInput{AccountID: account, Direction: dir, Amount: money.FromNaira(naira)}
+	return EntryInput{AccountID: account, Direction: dir, Amount: ngn(naira)}
+}
+
+// ngn builds a whole-Naira Money for test readability.
+func ngn(naira int64) money.Money {
+	return money.Money{Minor: naira * 100, Currency: money.NGN}
 }
 
 func posting(entries ...EntryInput) PostingRequest {
@@ -57,15 +62,15 @@ func TestValidatePosting_RejectsSingleEntry(t *testing.T) {
 
 func TestValidatePosting_RejectsZeroAndNegativeAmounts(t *testing.T) {
 	zero := ValidatePosting(posting(
-		EntryInput{AccountID: "a", Direction: Debit, Amount: money.Zero},
-		EntryInput{AccountID: "b", Direction: Credit, Amount: money.Zero},
+		EntryInput{AccountID: "a", Direction: Debit, Amount: money.Money{Currency: money.NGN}},
+		EntryInput{AccountID: "b", Direction: Credit, Amount: money.Money{Currency: money.NGN}},
 	))
 	require.ErrorIs(t, zero, ErrNonPositiveAmount)
 
 	// A negative debit is an unsigned credit in disguise; direction carries sign.
 	negative := ValidatePosting(posting(
-		EntryInput{AccountID: "a", Direction: Debit, Amount: money.FromNaira(-100)},
-		EntryInput{AccountID: "b", Direction: Credit, Amount: money.FromNaira(-100)},
+		EntryInput{AccountID: "a", Direction: Debit, Amount: ngn(-100)},
+		EntryInput{AccountID: "b", Direction: Credit, Amount: ngn(-100)},
 	))
 	require.ErrorIs(t, negative, ErrNonPositiveAmount)
 }
@@ -84,7 +89,7 @@ func TestValidatePosting_RequiresIdempotencyKey(t *testing.T) {
 
 func TestValidatePosting_RejectsUnknownDirection(t *testing.T) {
 	err := ValidatePosting(posting(
-		EntryInput{AccountID: "a", Direction: Direction("sideways"), Amount: money.FromNaira(10)},
+		EntryInput{AccountID: "a", Direction: Direction("sideways"), Amount: ngn(10)},
 		entry("b", Credit, 10),
 	))
 	require.Error(t, err)
@@ -92,7 +97,7 @@ func TestValidatePosting_RejectsUnknownDirection(t *testing.T) {
 }
 
 func TestValidatePosting_DetectsOverflow(t *testing.T) {
-	huge := money.Kobo(1<<62) + money.Kobo(1<<62-1)
+	huge := money.Money{Minor: (1 << 62) + (1<<62 - 1), Currency: money.NGN}
 	err := ValidatePosting(posting(
 		EntryInput{AccountID: "a", Direction: Debit, Amount: huge},
 		EntryInput{AccountID: "b", Direction: Debit, Amount: huge},
@@ -141,4 +146,32 @@ func TestAdvanceFSM_NoDoubleSettlement(t *testing.T) {
 	assert.False(t, CanTransitionAdvance(AdvanceSettled, AdvanceSettled))
 	assert.False(t, CanTransitionAdvance(AdvanceRequested, AdvanceSettled),
 		"settlement must go through approval and disbursement")
+}
+
+// The invariant migration 000015 exists to protect: a transaction that mixes
+// currencies must be rejected before any arithmetic is attempted. Summing
+// ₦50,000 against $50,000 produces a "balanced" transaction and silent money
+// corruption.
+func TestValidatePosting_RejectsMixedCurrencies(t *testing.T) {
+	err := ValidatePosting(posting(
+		EntryInput{AccountID: "a", Direction: Debit, Amount: money.Money{Minor: 50_000_00, Currency: money.NGN}},
+		EntryInput{AccountID: "b", Direction: Credit, Amount: money.Money{Minor: 50_000_00, Currency: money.USD}},
+	))
+	require.ErrorIs(t, err, money.ErrCurrencyMismatch)
+}
+
+func TestValidatePosting_AcceptsNonNairaSingleCurrency(t *testing.T) {
+	err := ValidatePosting(posting(
+		EntryInput{AccountID: "a", Direction: Debit, Amount: money.Money{Minor: 25_00, Currency: money.USD}},
+		EntryInput{AccountID: "b", Direction: Credit, Amount: money.Money{Minor: 25_00, Currency: money.USD}},
+	))
+	assert.NoError(t, err, "the ledger must not be NGN-only")
+}
+
+func TestValidatePosting_RejectsUnknownCurrency(t *testing.T) {
+	err := ValidatePosting(posting(
+		EntryInput{AccountID: "a", Direction: Debit, Amount: money.Money{Minor: 100, Currency: money.Currency("XYZ")}},
+		EntryInput{AccountID: "b", Direction: Credit, Amount: money.Money{Minor: 100, Currency: money.Currency("XYZ")}},
+	))
+	require.ErrorIs(t, err, money.ErrUnknownCurrency)
 }

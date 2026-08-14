@@ -264,7 +264,7 @@ func (s *EWAService) RequestAdvance(
 			EmployeeID:             employeeID,
 			Period:                 el.Period,
 			AmountKobo:             amount,
-			FeeKobo:                money.Zero, // fee-free by design; see EWA_ROADMAP.md
+			FeeKobo:                money.Zero, // fee-free by design; see docs/EWA_ROADMAP.md
 			AccruedAtRequestKobo:   el.AccruedToDate,
 			AvailableAtRequestKobo: el.Available,
 			DependencyScore:        el.Dependency.Score,

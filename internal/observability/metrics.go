@@ -81,4 +81,37 @@ var (
 		Name: "payroll_bvn_verifications_total",
 		Help: "BVN verification outcomes — low success rate = provider issue or data quality problem.",
 	}, []string{"provider", "status"})
+
+	// Settlement integrity — any non-zero value here is a page, not a dashboard line.
+	WebhookAmountMismatchTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payroll_webhook_amount_mismatch_total",
+		Help: "Webhooks whose reported amount disagreed with the stored item amount.",
+	}, []string{"org_id"})
+
+	LedgerImbalanceTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payroll_ledger_imbalance_total",
+		Help: "Ledger transactions rejected because debits did not equal credits.",
+	}, []string{"org_id"})
+
+	// EWA — answers "is early wage access helping or trapping people?"
+	EWAAdvancesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payroll_ewa_advances_total",
+		Help: "EWA advance requests by org and outcome.",
+	}, []string{"org_id", "outcome"}) // "approved" | "rejected"
+
+	EWADeclineReasonsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payroll_ewa_decline_reasons_total",
+		Help: "Why EWA requests were declined — the guardrail that fired.",
+	}, []string{"org_id", "reason"})
+
+	EWADependencyTier = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "payroll_ewa_dependency_tier_employees",
+		Help: "Employees currently in each dependency tier — the product-health metric that matters most.",
+	}, []string{"org_id", "tier"}) // "healthy" | "elevated" | "strained" | "dependent"
+
+	EWAUtilizationRatio = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "payroll_ewa_utilization_ratio",
+		Help:    "Fraction of earned wages drawn before payday, per approved advance.",
+		Buckets: []float64{0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.75, 0.9, 1.0},
+	}, []string{"org_id"})
 )

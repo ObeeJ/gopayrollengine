@@ -14,11 +14,70 @@ Every tenant-scoped DB write or read must run inside `models.WithOrgScope(ctx, o
 - The only legitimate unscoped read is the webhook's `lookup_payroll_item_for_webhook(ref)` call (SECURITY DEFINER function, migration 000011). Reason: Monnify callbacks don't carry orgID, so we need a single-UUID read to learn it. All subsequent writes are scoped via the loaded `item.OrganizationID`.
 - The `audit_events` policy allows `organization_id IS NULL` for system-level events. Pass `""` to `AppendAuditTx` for those.
 
+## The ledger is the source of truth for value
+
+Every movement of value posts balanced entries through `models.PostTransaction`.
+Balances are **derived** by summing entries (`models.AccountBalance`) — never
+stored. A stored balance is a cache that drifts; a derived one cannot.
+
+- `debits = credits` is enforced by a DEFERRABLE constraint trigger that fires at
+  COMMIT (migration 000013), not by application code. `ValidatePosting` runs the
+  same check earlier only to produce a better error message.
+- `ledger_entries` is append-only — a trigger rejects UPDATE and DELETE.
+  Corrections are new reversing entries.
+- Entry amounts are strictly positive; `direction` carries the sign.
+- Every posting needs an idempotency key, uniquely indexed per org, so a retried
+  disbursement is a no-op instead of a double-post.
+
+Don't add a mutable balance column. If you need a balance, sum the entries.
+
+## EWA: advances are claims on wages already earned
+
+`internal/services/ewa_service.go` recomputes eligibility **inside the same
+transaction that writes the advance** — a client never supplies its own cap, and
+a concurrent request cannot race past one checked a moment earlier.
+
+- Accrual is straight-line over *working* days (`AccruedToDate`). The engine
+  assumes monthly salaried staff. Hourly accrual needs real timesheet data and is
+  deliberately unimplemented rather than approximated.
+- Advances settle by netting out of the next payroll item, inside the payroll
+  creation transaction (`SettleAdvancesForPayrollItem`). An advance that does not
+  settle is money the business never recovers.
+- **Only `disbursed` advances are deducted from wages.** An advance that was
+  approved but never actually paid out is *cancelled* with a reversing ledger
+  entry and withholds nothing. Deducting pay for money the worker never received
+  is wage theft, not an accounting detail. `approved → settled` is deliberately
+  absent from the FSM so this cannot be done by accident.
+- Guardrails live in `ewa_dependency.go`. `ScoreDependency` is a pure function —
+  keep it that way, it is the only reason the thresholds are testable.
+- **`TierCap` must never return zero.** Cutting off a worker in need moves them to
+  a payday lender at multiples of our cost; it does not remove the need. Every
+  tier retains `EmergencyFloorKobo`, and a test asserts it. If you find yourself
+  changing that test, it is the wrong fix.
+- No fee, no recourse beyond payroll deduction, no collections, no credit
+  reporting. That is the regulatory position, not only an ethical preference —
+  see `docs/EWA_ROADMAP.md` §7. `fee_kobo` exists and defaults to zero; enabling
+  it needs legal review.
+- Dependency data goes to employers in aggregate only. Per-worker exposure is a
+  retaliation vector.
+
 ## FSM transitions and atomicity
 
 `models.TransitionStatus(tx, row, current, next)` is a CAS UPDATE. If `RowsAffected == 0` it returns `models.ErrStaleStatus` — treat that as idempotent success in concurrent paths (webhook), or as a duplicate-task abort (worker).
 
 Counter init and FSM transition for a payroll happen as one atomic UPDATE in the worker (`UPDATE payrolls SET status=processing, pending_count=N WHERE id=? AND status IN (pending, failed)`). Never split that into separate statements — webhooks racing during the Monnify call depend on `pending_count` already being correct.
+
+`pending_count` counts only items that can still decrement it. The worker submits
+and counts **unsettled items only** — the `failed → processing` retry edge means a
+batch re-enters the worker still carrying items Monnify already settled. Counting
+or re-sending those pays a worker twice and leaves the counter unable to reach
+zero. Items whose employee is soft-deleted are failed rather than skipped, for the
+same reason: a skipped item holds the counter above zero forever.
+
+The webhook amount is decimal **Naira** on the wire. Parse it with
+`money.FromNairaString`, never straight into `money.Kobo` — `Kobo.UnmarshalJSON`
+reads a bare number as minor units, which is a 100× error. The reported amount is
+checked against the stored item amount before the item is settled.
 
 The webhook decrement uses `UPDATE ... RETURNING pending_count, status` so exactly one path observes zero (no decrement-then-SELECT TOCTOU).
 

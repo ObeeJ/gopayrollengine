@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"go-payroll-engine/internal/api/middleware"
 	"go-payroll-engine/internal/models"
+	"go-payroll-engine/internal/observability"
 	"go-payroll-engine/pkg/money"
 	"io"
 	"net/http"
@@ -24,12 +25,20 @@ type WebhookHandler struct{}
 type MonnifyWebhookPayload struct {
 	EventType string `json:"eventType"`
 	EventData struct {
-		BatchReference       string     `json:"batchReference"`
-		TransactionReference string     `json:"transactionReference"`
-		Status               string     `json:"status"`
-		// Monnify sends decimal Naira on the wire; Kobo.UnmarshalJSON parses it.
-		Amount money.Kobo `json:"amount"`
+		BatchReference       string `json:"batchReference"`
+		TransactionReference string `json:"transactionReference"`
+		Status               string `json:"status"`
+		// Monnify sends decimal *Naira* on the wire ("1500.50"). It is decoded as a
+		// raw json.Number and converted through money.FromNairaString so the decimal
+		// never touches a float64. Decoding straight into money.Kobo would be a
+		// 100× unit error — Kobo.UnmarshalJSON reads a bare number as minor units.
+		Amount json.Number `json:"amount"`
 	} `json:"eventData"`
+}
+
+// disbursedKobo converts the Monnify wire amount (decimal Naira) into Kobo.
+func (p MonnifyWebhookPayload) disbursedKobo() (money.Kobo, error) {
+	return money.FromNairaString(p.EventData.Amount.String())
 }
 
 // HandleMonnifyWebhook — verifies HMAC, dedupes via bloom + DB, transitions the item, reconciles the parent.
@@ -94,6 +103,36 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 	var newStatus models.PayrollStatus
 	switch payload.EventType {
 	case "DISBURSEMENT_SUCCESSFUL":
+		// Never mark an item settled without checking that the amount Monnify says
+		// it moved equals the amount we asked it to move. A mismatch is either a
+		// malformed callback or a disbursement against the wrong item; both need a
+		// human, and neither justifies closing the item.
+		disbursed, convErr := payload.disbursedKobo()
+		if convErr != nil {
+			middleware.Logger.Error("webhook amount unparseable",
+				"item_id", item.ID, "raw", payload.EventData.Amount.String(), "error", convErr.Error())
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid amount"})
+			return
+		}
+		if disbursed != item.Amount {
+			observability.WebhookAmountMismatchTotal.WithLabelValues(item.OrganizationID).Inc()
+			middleware.Logger.Error("CRITICAL: webhook amount does not match item amount",
+				"item_id", item.ID,
+				"expected_kobo", int64(item.Amount),
+				"reported_kobo", int64(disbursed),
+			)
+			// Record the discrepancy, then refuse. Returning 422 keeps Monnify
+			// retrying rather than letting a mismatched settlement pass silently.
+			if auditErr := models.WithOrgScope(c.Request.Context(), item.OrganizationID, func(tx *gorm.DB) error {
+				return models.AppendAuditTx(tx, item.OrganizationID, "PayrollItem", item.ID, "amount_mismatch",
+					item.Amount.String(), disbursed.String(), c.ClientIP(), "")
+			}); auditErr != nil {
+				middleware.Logger.Error("amount mismatch audit write failed",
+					"item_id", item.ID, "error", auditErr.Error())
+			}
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "amount mismatch"})
+			return
+		}
 		newStatus = models.PayrollCompleted
 	case "DISBURSEMENT_FAILED":
 		newStatus = models.PayrollFailed
@@ -132,17 +171,24 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 			PendingCount int                  `gorm:"column:pending_count"`
 			Status       models.PayrollStatus `gorm:"column:status"`
 		}
-		if err := tx.Raw(
+		// The pending_count > 0 guard keeps the counter from going negative if a
+		// stray webhook ever slips past the guards above; without it the counter
+		// could re-cross zero and reconcile the same batch twice.
+		res := tx.Raw(
 			`UPDATE payrolls
 			    SET pending_count = pending_count - 1,
 			        updated_at    = NOW()
 			  WHERE id = ?
+			    AND pending_count > 0
 			RETURNING pending_count, status`,
 			item.PayrollID,
-		).Scan(&post).Error; err != nil {
-			return fmt.Errorf("atomic pending_count decrement failed: %w", err)
+		).Scan(&post)
+		if res.Error != nil {
+			return fmt.Errorf("atomic pending_count decrement failed: %w", res.Error)
 		}
-		if post.PendingCount <= 0 {
+		// No row updated means the counter was already zero — the batch has been
+		// reconciled by another webhook. The item transition above still stands.
+		if res.RowsAffected > 0 && post.PendingCount == 0 {
 			reconcilePayrollStatus(tx, orgID, models.Payroll{
 				ID:     item.PayrollID,
 				Status: post.Status,

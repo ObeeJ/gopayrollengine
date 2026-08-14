@@ -44,9 +44,15 @@ jobs:
           version: latest
           args: --timeout=5m
 
+      # Pinned, not @latest. gosec v2.28.0 raised its floor to Go 1.25.8 while
+      # go.mod pins 1.25.0 and GOTOOLCHAIN=local blocks the auto-upgrade, so
+      # @latest broke this job on every branch the day that release landed —
+      # with no code change involved. Pinning also stops an unreviewed upstream
+      # release from executing in CI, the same reasoning already applied to
+      # trivy-action below. Bump deliberately alongside the go.mod toolchain.
       - name: gosec
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
           gosec -severity medium -confidence medium -exclude=G115 ./...
 
       - name: govulncheck

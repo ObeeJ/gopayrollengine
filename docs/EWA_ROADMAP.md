@@ -163,6 +163,7 @@ Principles 2 and 3 are also the regulatory strategy — see §7.
 | Dependency scoring (4 signals, 0–100, 4 tiers) | `internal/services/ewa_dependency.go` |
 | Graduated tier response with emergency floor | `TierCap` |
 | Settlement netted out of payroll, same transaction | `SettleAdvancesForPayrollItem`, `payroll_service.go` |
+| Undisbursed advances cancelled, never deducted from wages | `SettleAdvancesForPayrollItem` |
 | Advance FSM with terminal states | `internal/models/ewa.go` |
 | Per-org configurable policy | `ewa_policies` table |
 | RLS tenant isolation on every new table | `000013`, `000014` |

@@ -368,8 +368,19 @@ func (s *EWAService) postAdvanceLedger(tx *gorm.DB, orgID, employeeID string, ad
 // payroll item and records the recovery in the ledger. Returns the amount
 // withheld. Called inside the payroll creation transaction.
 //
+// Only *disbursed* advances are recovered:
+//
 //	Dr wage_payable        (employee)  we owe the worker less
 //	Cr advance_receivable  (employee)  the debt is cleared
+//
+// An advance that was approved but never disbursed is **cancelled**, not
+// settled, and withholds nothing. Deducting pay for money the worker never
+// received would be a wage theft bug, not an accounting detail. Its original
+// receivable is reversed rather than edited, because ledger entries are
+// immutable:
+//
+//	Dr cash_settlement     (org)       the committed cash was never sent
+//	Cr advance_receivable  (employee)  the receivable is written back
 func (s *EWAService) SettleAdvancesForPayrollItem(
 	tx *gorm.DB, orgID, employeeID, period, payrollItemID string,
 ) (money.Kobo, error) {
@@ -394,13 +405,41 @@ func (s *EWAService) SettleAdvancesForPayrollItem(
 		return 0, err
 	}
 
+	cash, err := models.EnsureAccount(tx, orgID, "", models.AccountCashSettlement)
+	if err != nil {
+		return 0, err
+	}
+
 	var withheld money.Kobo
 	for i := range advances {
 		adv := &advances[i]
 
-		// Approved-but-not-disbursed still represents money committed; both settle.
-		from := adv.Status
-		if err := models.TransitionAdvance(tx, adv, from, models.AdvanceSettled); err != nil {
+		if adv.Status == models.AdvanceApproved {
+			// Committed but never sent. Cancel it and reverse the receivable; the
+			// worker gets their full pay.
+			if err := models.TransitionAdvance(tx, adv, models.AdvanceApproved, models.AdvanceCancelled); err != nil {
+				if errors.Is(err, models.ErrStaleStatus) {
+					continue
+				}
+				return 0, err
+			}
+			if _, err := models.PostTransaction(tx, models.PostingRequest{
+				OrgID:          orgID,
+				Kind:           "ewa_cancellation",
+				Reference:      adv.ID,
+				IdempotencyKey: "ewa_cancellation:" + adv.ID,
+				Entries: []models.EntryInput{
+					{AccountID: cash.ID, Direction: models.Debit, Amount: adv.AmountKobo},
+					{AccountID: receivable.ID, Direction: models.Credit, Amount: adv.AmountKobo},
+				},
+			}); err != nil {
+				observability.LedgerImbalanceTotal.WithLabelValues(orgID).Inc()
+				return 0, err
+			}
+			continue
+		}
+
+		if err := models.TransitionAdvance(tx, adv, models.AdvanceDisbursed, models.AdvanceSettled); err != nil {
 			if errors.Is(err, models.ErrStaleStatus) {
 				continue // another settlement pass won
 			}

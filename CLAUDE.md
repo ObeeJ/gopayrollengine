@@ -43,6 +43,11 @@ a concurrent request cannot race past one checked a moment earlier.
 - Advances settle by netting out of the next payroll item, inside the payroll
   creation transaction (`SettleAdvancesForPayrollItem`). An advance that does not
   settle is money the business never recovers.
+- **Only `disbursed` advances are deducted from wages.** An advance that was
+  approved but never actually paid out is *cancelled* with a reversing ledger
+  entry and withholds nothing. Deducting pay for money the worker never received
+  is wage theft, not an accounting detail. `approved → settled` is deliberately
+  absent from the FSM so this cannot be done by accident.
 - Guardrails live in `ewa_dependency.go`. `ScoreDependency` is a pure function —
   keep it that way, it is the only reason the thresholds are testable.
 - **`TierCap` must never return zero.** Cutting off a worker in need moves them to

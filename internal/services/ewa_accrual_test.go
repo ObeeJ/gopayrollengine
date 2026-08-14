@@ -13,15 +13,17 @@ import (
 // August 2026: 1st is a Saturday, 31st is a Monday — 21 working days.
 const augustWorkingDays = 21
 
-func atUTC(y int, m time.Month, d int) time.Time {
-	return time.Date(y, m, d, 9, 0, 0, 0, time.UTC)
+// atUTC builds a mid-morning instant in 2026, the year every accrual case here
+// is anchored to.
+func atUTC(m time.Month, d int) time.Time {
+	return time.Date(2026, m, d, 9, 0, 0, 0, time.UTC)
 }
 
 func TestAccruedToDate_NothingEarnedOnDayOne(t *testing.T) {
 	salary := money.FromNaira(210_000)
 
 	// 1 Aug 2026 is a Saturday; no working day has completed.
-	got, err := AccruedToDate(salary, "2026-08", atUTC(2026, time.August, 1))
+	got, err := AccruedToDate(salary, "2026-08", atUTC(time.August, 1))
 	require.NoError(t, err)
 	assert.Equal(t, money.Zero, got)
 }
@@ -30,7 +32,7 @@ func TestAccruedToDate_MidMonthIsProRata(t *testing.T) {
 	salary := money.FromNaira(210_000)
 
 	// By the morning of Mon 17 Aug, the 10 working days of 3–14 Aug have completed.
-	got, err := AccruedToDate(salary, "2026-08", atUTC(2026, time.August, 17))
+	got, err := AccruedToDate(salary, "2026-08", atUTC(time.August, 17))
 	require.NoError(t, err)
 
 	want, err := salary.Percent(10, augustWorkingDays)
@@ -42,7 +44,7 @@ func TestAccruedToDate_MidMonthIsProRata(t *testing.T) {
 func TestAccruedToDate_FullSalaryAfterPeriodEnds(t *testing.T) {
 	salary := money.FromNaira(210_000)
 
-	got, err := AccruedToDate(salary, "2026-08", atUTC(2026, time.September, 1))
+	got, err := AccruedToDate(salary, "2026-08", atUTC(time.September, 1))
 	require.NoError(t, err)
 	assert.Equal(t, salary, got)
 }
@@ -50,7 +52,7 @@ func TestAccruedToDate_FullSalaryAfterPeriodEnds(t *testing.T) {
 func TestAccruedToDate_ZeroBeforePeriodStarts(t *testing.T) {
 	salary := money.FromNaira(210_000)
 
-	got, err := AccruedToDate(salary, "2026-08", atUTC(2026, time.July, 20))
+	got, err := AccruedToDate(salary, "2026-08", atUTC(time.July, 20))
 	require.NoError(t, err)
 	assert.Equal(t, money.Zero, got)
 }
@@ -59,9 +61,9 @@ func TestAccruedToDate_WeekendDoesNotAccrue(t *testing.T) {
 	salary := money.FromNaira(210_000)
 
 	// Fri 7 Aug close vs Sun 9 Aug: the weekend adds nothing.
-	friday, err := AccruedToDate(salary, "2026-08", atUTC(2026, time.August, 8))
+	friday, err := AccruedToDate(salary, "2026-08", atUTC(time.August, 8))
 	require.NoError(t, err)
-	sunday, err := AccruedToDate(salary, "2026-08", atUTC(2026, time.August, 9))
+	sunday, err := AccruedToDate(salary, "2026-08", atUTC(time.August, 9))
 	require.NoError(t, err)
 
 	assert.Equal(t, friday, sunday, "no wages accrue over a weekend")
@@ -72,7 +74,7 @@ func TestAccruedToDate_MonotonicAcrossMonth(t *testing.T) {
 
 	var prev money.Kobo
 	for day := 1; day <= 31; day++ {
-		got, err := AccruedToDate(salary, "2026-08", atUTC(2026, time.August, day))
+		got, err := AccruedToDate(salary, "2026-08", atUTC(time.August, day))
 		require.NoError(t, err)
 		assert.GreaterOrEqual(t, int64(got), int64(prev),
 			"accrual must never decrease (day %d)", day)
@@ -83,13 +85,13 @@ func TestAccruedToDate_MonotonicAcrossMonth(t *testing.T) {
 }
 
 func TestAccruedToDate_ZeroSalary(t *testing.T) {
-	got, err := AccruedToDate(money.Zero, "2026-08", atUTC(2026, time.August, 17))
+	got, err := AccruedToDate(money.Zero, "2026-08", atUTC(time.August, 17))
 	require.NoError(t, err)
 	assert.Equal(t, money.Zero, got)
 }
 
 func TestAccruedToDate_InvalidPeriod(t *testing.T) {
-	_, err := AccruedToDate(money.FromNaira(100_000), "August 2026", atUTC(2026, time.August, 17))
+	_, err := AccruedToDate(money.FromNaira(100_000), "August 2026", atUTC(time.August, 17))
 	assert.Error(t, err)
 }
 
@@ -104,7 +106,7 @@ func TestAccrual_CapNeverExceedsEarnings(t *testing.T) {
 	salary := money.FromNaira(210_000)
 
 	for day := 1; day <= 31; day++ {
-		accrued, err := AccruedToDate(salary, "2026-08", atUTC(2026, time.August, day))
+		accrued, err := AccruedToDate(salary, "2026-08", atUTC(time.August, day))
 		require.NoError(t, err)
 
 		for _, pct := range []int64{1, 25, 50, 75, 100} {

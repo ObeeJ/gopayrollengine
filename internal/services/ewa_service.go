@@ -339,11 +339,11 @@ func (s *EWAService) RequestAdvance(
 //	Dr advance_receivable (employee)   money we expect back from payroll
 //	Cr cash_settlement    (org)        money that left
 func (s *EWAService) postAdvanceLedger(tx *gorm.DB, orgID, employeeID string, adv *models.EWAAdvance) error {
-	receivable, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable)
+	receivable, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable, money.NGN)
 	if err != nil {
 		return err
 	}
-	cash, err := models.EnsureAccount(tx, orgID, "", models.AccountCashSettlement)
+	cash, err := models.EnsureAccount(tx, orgID, "", models.AccountCashSettlement, money.NGN)
 	if err != nil {
 		return err
 	}
@@ -354,8 +354,8 @@ func (s *EWAService) postAdvanceLedger(tx *gorm.DB, orgID, employeeID string, ad
 		Reference:      adv.ID,
 		IdempotencyKey: "ewa_advance:" + adv.ID,
 		Entries: []models.EntryInput{
-			{AccountID: receivable.ID, Direction: models.Debit, Amount: adv.AmountKobo},
-			{AccountID: cash.ID, Direction: models.Credit, Amount: adv.AmountKobo},
+			{AccountID: receivable.ID, Direction: models.Debit, Amount: money.NGNFromKobo(adv.AmountKobo)},
+			{AccountID: cash.ID, Direction: models.Credit, Amount: money.NGNFromKobo(adv.AmountKobo)},
 		},
 	})
 	if err != nil {
@@ -396,16 +396,16 @@ func (s *EWAService) SettleAdvancesForPayrollItem(
 		return money.Zero, nil
 	}
 
-	receivable, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable)
+	receivable, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable, money.NGN)
 	if err != nil {
 		return 0, err
 	}
-	payable, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountWagePayable)
+	payable, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountWagePayable, money.NGN)
 	if err != nil {
 		return 0, err
 	}
 
-	cash, err := models.EnsureAccount(tx, orgID, "", models.AccountCashSettlement)
+	cash, err := models.EnsureAccount(tx, orgID, "", models.AccountCashSettlement, money.NGN)
 	if err != nil {
 		return 0, err
 	}
@@ -429,8 +429,8 @@ func (s *EWAService) SettleAdvancesForPayrollItem(
 				Reference:      adv.ID,
 				IdempotencyKey: "ewa_cancellation:" + adv.ID,
 				Entries: []models.EntryInput{
-					{AccountID: cash.ID, Direction: models.Debit, Amount: adv.AmountKobo},
-					{AccountID: receivable.ID, Direction: models.Credit, Amount: adv.AmountKobo},
+					{AccountID: cash.ID, Direction: models.Debit, Amount: money.NGNFromKobo(adv.AmountKobo)},
+					{AccountID: receivable.ID, Direction: models.Credit, Amount: money.NGNFromKobo(adv.AmountKobo)},
 				},
 			}); err != nil {
 				observability.LedgerImbalanceTotal.WithLabelValues(orgID).Inc()
@@ -456,8 +456,8 @@ func (s *EWAService) SettleAdvancesForPayrollItem(
 			Reference:      adv.ID,
 			IdempotencyKey: "ewa_settlement:" + adv.ID,
 			Entries: []models.EntryInput{
-				{AccountID: payable.ID, Direction: models.Debit, Amount: adv.AmountKobo},
-				{AccountID: receivable.ID, Direction: models.Credit, Amount: adv.AmountKobo},
+				{AccountID: payable.ID, Direction: models.Debit, Amount: money.NGNFromKobo(adv.AmountKobo)},
+				{AccountID: receivable.ID, Direction: models.Credit, Amount: money.NGNFromKobo(adv.AmountKobo)},
 			},
 		}); err != nil {
 			observability.LedgerImbalanceTotal.WithLabelValues(orgID).Inc()

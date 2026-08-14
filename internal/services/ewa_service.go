@@ -107,6 +107,18 @@ type Eligibility struct {
 	Available     money.Kobo `json:"available"`
 	MinimumDraw   money.Kobo `json:"minimum_draw"`
 
+	// ProjectedPayday is what will actually land on payday if nothing further is
+	// drawn, and ProjectedPaydayIfMaxDrawn if the whole remaining allowance is
+	// taken. UK user research is unambiguous that people grasp "money available
+	// now" far more readily than "next payday reduced" — they experience the
+	// smaller paycheck as a surprise. Both numbers are returned so the interface
+	// can show the consequence next to the offer rather than a screen later.
+	ProjectedPayday           money.Kobo `json:"projected_payday"`
+	ProjectedPaydayIfMaxDrawn money.Kobo `json:"projected_payday_if_max_drawn"`
+
+	// ProtectedPayday is the worker's own floor, if they set one.
+	ProtectedPayday money.Kobo `json:"protected_payday"`
+
 	DrawsThisPeriod int        `json:"draws_this_period"`
 	MaxDraws        int        `json:"max_draws_per_period"`
 	NextEligibleAt  *time.Time `json:"next_eligible_at,omitempty"`
@@ -205,7 +217,37 @@ func (s *EWAService) eligibilityTx(tx *gorm.DB, orgID, employeeID string, asOf t
 	if err != nil || available.IsNegative() {
 		available = money.Zero
 	}
+
+	// The worker's own floor caps everything else. Applied last and
+	// unconditionally: a self-imposed limit must not be overridden by a policy
+	// or tier that happens to be more generous, or it is not a limit at all.
+	pref, err := s.workerPreferenceTx(tx, orgID, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	el.ProtectedPayday = pref.ProtectedPayday()
+	if el.ProtectedPayday.IsPositive() {
+		spendable, subErr := emp.Salary.Sub(el.ProtectedPayday)
+		if subErr != nil || spendable.IsNegative() {
+			spendable = money.Zero
+		}
+		headroom, subErr := spendable.Sub(outstanding)
+		if subErr != nil || headroom.IsNegative() {
+			headroom = money.Zero
+		}
+		if headroom < available {
+			available = headroom
+		}
+	}
 	el.Available = available
+
+	// What actually lands on payday, now and in the worst case.
+	if projected, subErr := emp.Salary.Sub(outstanding); subErr == nil && !projected.IsNegative() {
+		el.ProjectedPayday = projected
+		if worst, wErr := projected.Sub(available); wErr == nil && !worst.IsNegative() {
+			el.ProjectedPaydayIfMaxDrawn = worst
+		}
+	}
 
 	// Velocity guardrails.
 	if drawsThisPeriod >= policy.MaxDrawsPerPeriod {
@@ -471,6 +513,21 @@ func (s *EWAService) SettleAdvancesForPayrollItem(
 		withheld = next
 	}
 	return withheld, nil
+}
+
+// workerPreferenceTx loads the worker's self-imposed floor, defaulting to none.
+func (s *EWAService) workerPreferenceTx(
+	tx *gorm.DB, orgID, employeeID string,
+) (*models.EWAWorkerPreference, error) {
+	var pref models.EWAWorkerPreference
+	err := tx.First(&pref, "organization_id = ? AND employee_id = ?", orgID, employeeID).Error
+	if err == nil {
+		return &pref, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	return &models.EWAWorkerPreference{OrganizationID: orgID, EmployeeID: employeeID}, nil
 }
 
 // policyTx loads the org's policy, falling back to the conservative default.

@@ -492,3 +492,85 @@ func TestEWAAdvances_OwnScopeStillReadable(t *testing.T) {
 		return nil
 	}))
 }
+
+// setProtectedPayday records a worker-set floor.
+func setProtectedPayday(t *testing.T, orgID, employeeID string, protect money.Kobo) {
+	t.Helper()
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return tx.Save(&models.EWAWorkerPreference{
+			OrganizationID:       orgID,
+			EmployeeID:           employeeID,
+			ProtectedPaydayMinor: int64(protect),
+		}).Error
+	}))
+}
+
+// A worker's own floor must cap access even when policy and tier would allow
+// more. This is the one guardrail whose legitimacy does not depend on the
+// dependency model being correct, so it must be the one that binds hardest.
+func TestEligibility_WorkerFloorCapsAvailable(t *testing.T) {
+	skipIfNoDB(t)
+	salary := money.FromNaira(300_000)
+	orgID, employeeID := seedWorker(t, salary)
+	svc := NewEWAService()
+
+	before, err := svc.GetEligibility(context.Background(), orgID, employeeID, time.Now())
+	require.NoError(t, err)
+	require.True(t, before.Available.IsPositive(), "expected headroom before the floor is set")
+
+	// Ask to protect nearly the whole salary, leaving only N10,000 spendable.
+	setProtectedPayday(t, orgID, employeeID, money.FromNaira(290_000))
+
+	after, err := svc.GetEligibility(context.Background(), orgID, employeeID, time.Now())
+	require.NoError(t, err)
+
+	assert.Equal(t, money.FromNaira(290_000), after.ProtectedPayday)
+	assert.LessOrEqual(t, int64(after.Available), int64(money.FromNaira(10_000)),
+		"the worker's floor must bind even though the policy cap is higher")
+	assert.Less(t, int64(after.Available), int64(before.Available),
+		"setting a floor must reduce available, not merely be recorded")
+}
+
+// The UK evidence is that users grasp "money available now" but are surprised by
+// the smaller paycheck. Both numbers must be present and internally consistent.
+func TestEligibility_ProjectsThePaycheckConsequence(t *testing.T) {
+	skipIfNoDB(t)
+	salary := money.FromNaira(300_000)
+	orgID, employeeID := seedWorker(t, salary)
+	svc := NewEWAService()
+
+	el, err := svc.GetEligibility(context.Background(), orgID, employeeID, time.Now())
+	require.NoError(t, err)
+
+	// Nothing drawn yet, so the projected payday is the whole salary.
+	assert.Equal(t, salary, el.ProjectedPayday)
+
+	// Drawing the full allowance must reduce payday by exactly that allowance.
+	expected, err := el.ProjectedPayday.Sub(el.Available)
+	require.NoError(t, err)
+	assert.Equal(t, expected, el.ProjectedPaydayIfMaxDrawn,
+		"worst-case payday must equal payday minus everything still drawable")
+	assert.Less(t, int64(el.ProjectedPaydayIfMaxDrawn), int64(el.ProjectedPayday))
+}
+
+// After a draw, the projected payday must fall by the drawn amount — the number
+// the worker is most likely to be surprised by has to stay truthful.
+func TestEligibility_ProjectedPaydayFallsAfterDrawing(t *testing.T) {
+	skipIfNoDB(t)
+	salary := money.FromNaira(300_000)
+	orgID, employeeID := seedWorker(t, salary)
+	svc := NewEWAService()
+
+	drawn := money.FromNaira(5_000)
+	_, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, drawn, "proj-1", "127.0.0.1")
+	require.NoError(t, err)
+
+	el, err := svc.GetEligibility(context.Background(), orgID, employeeID, time.Now())
+	require.NoError(t, err)
+
+	expected, err := salary.Sub(drawn)
+	require.NoError(t, err)
+	assert.Equal(t, expected, el.ProjectedPayday,
+		"projected payday must reflect what has already been taken")
+}

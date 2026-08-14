@@ -103,13 +103,16 @@ type EWAPolicy struct {
 func (EWAPolicy) TableName() string { return "ewa_policies" }
 
 // DefaultEWAPolicy — the values an org gets before anyone tunes anything.
-// Chosen to be conservative: it is far easier to loosen a policy after watching
-// real usage than to claw back access people have started depending on.
+//
+// 30% matches what Nigerian employee cooperatives already offer as a salary
+// advance with payroll recovery, so it lands on a number workers recognise
+// rather than one invented here. It is far easier to loosen a policy after
+// watching real usage than to claw back access people have built a budget on.
 func DefaultEWAPolicy(orgID string) EWAPolicy {
 	return EWAPolicy{
 		OrganizationID:     orgID,
 		Enabled:            true,
-		MaxAccrualPct:      50,
+		MaxAccrualPct:      30,
 		AbsoluteCapKobo:    money.FromNaira(200_000),
 		MinDrawKobo:        money.FromNaira(1_000),
 		MaxDrawsPerPeriod:  4,
@@ -180,3 +183,28 @@ type EWAAccrualSnapshot struct {
 }
 
 func (EWAAccrualSnapshot) TableName() string { return "ewa_accrual_snapshots" }
+
+// EWAWorkerPreference — a worker's own guardrail, set by them rather than
+// imposed on them.
+//
+// ProtectedPaydayMinor is the amount of the next payday the worker has asked the
+// system to keep out of reach. It is applied as a cap on top of every policy and
+// tier limit, and it is the one guardrail whose legitimacy does not depend on
+// the dependency model being right.
+type EWAWorkerPreference struct {
+	OrganizationID string `gorm:"primaryKey" json:"organization_id"`
+	EmployeeID     string `gorm:"primaryKey" json:"employee_id"`
+
+	ProtectedPaydayMinor int64      `gorm:"column:protected_payday_minor" json:"protected_payday_minor"`
+	LastLoweredAt        *time.Time `json:"last_lowered_at,omitempty"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (EWAWorkerPreference) TableName() string { return "ewa_worker_preferences" }
+
+// ProtectedPayday returns the worker's self-imposed floor as Kobo.
+func (p EWAWorkerPreference) ProtectedPayday() money.Kobo {
+	return money.Kobo(p.ProtectedPaydayMinor)
+}

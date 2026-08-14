@@ -47,17 +47,71 @@ func TestScoreDependency_OccasionalUseStaysHealthy(t *testing.T) {
 }
 
 func TestScoreDependency_HeavyFrequentUseIsFlagged(t *testing.T) {
-	// Weekly draws of a meaningful share of salary for three months.
+	// Weekly draws of a large share of salary for three months: ~4/month is above
+	// the ~2.5/month population average, and 12 x N40k against N900k of window
+	// earnings is >50% utilization.
 	got := ScoreDependency(DependencyInput{
 		Now:           scoringNow,
 		Draws:         draws(12, 7, 1, money.FromNaira(40_000)),
 		MonthlySalary: money.FromNaira(300_000),
 	})
 
-	assert.GreaterOrEqual(t, got.Score, tierStrainedFloor,
-		"weekly large draws must reach at least strained; score=%d signals=%v", got.Score, got.Signals)
-	assert.Contains(t, []models.DependencyTier{models.TierStrained, models.TierDependent}, got.Tier)
+	assert.GreaterOrEqual(t, got.Score, tierElevatedFloor,
+		"weekly large draws must at least reach elevated; score=%d signals=%v", got.Score, got.Signals)
 	assert.NotEmpty(t, got.Reasons)
+}
+
+// The population average is ~2.5 draws/month. Someone at or near it must not be
+// flagged at all — the earlier calibration would have penalised the median user.
+func TestScoreDependency_AverageUserIsNotFlaggedOnFrequency(t *testing.T) {
+	// ~2.5 draws/month for three months, modest amounts.
+	got := ScoreDependency(DependencyInput{
+		Now:           scoringNow,
+		Draws:         draws(8, 11, 2, money.FromNaira(15_000)),
+		MonthlySalary: money.FromNaira(300_000),
+	})
+
+	assert.Zero(t, got.Signals["frequency"],
+		"a user at the population average must score zero on frequency; signals=%v", got.Signals)
+	assert.Equal(t, models.TierHealthy, got.Tier)
+}
+
+// Drawing shortly BEFORE payday is ordinary cash-flow smoothing (46% of users do
+// it 3-5 days out) and must not be penalised.
+func TestScoreDependency_PrePaydayDrawsAreNotPenalised(t *testing.T) {
+	payday := scoringNow.AddDate(0, 0, -2)
+	// Draws four days before that payday, i.e. six days ago.
+	history := []DrawEvent{
+		{At: payday.AddDate(0, 0, -4), Amount: money.FromNaira(20_000)},
+		{At: payday.AddDate(0, 0, -34), Amount: money.FromNaira(20_000)},
+	}
+
+	got := ScoreDependency(DependencyInput{
+		Now:           scoringNow,
+		Draws:         history,
+		MonthlySalary: money.FromNaira(300_000),
+		LastPayday:    payday,
+	})
+
+	assert.Zero(t, got.Signals["immediacy"],
+		"pre-payday draws are normal smoothing and must not score; signals=%v", got.Signals)
+}
+
+// A worker whose usage has saturated -- maxed on both frequency and utilization
+// but no longer rising -- has completed the trajectory, not avoided it. Scoring
+// escalation purely as growth would cap them below the dependent tier forever.
+func TestScoreDependency_SaturatedUserReachesDependent(t *testing.T) {
+	// Uniform daily draws: no month-over-month growth at all.
+	got := ScoreDependency(DependencyInput{
+		Now:           scoringNow,
+		Draws:         draws(60, 1, 0, money.FromNaira(50_000)),
+		MonthlySalary: money.FromNaira(300_000),
+	})
+
+	assert.Equal(t, maxEscalationScore, got.Signals["escalation"],
+		"saturation must count as completed escalation; signals=%v", got.Signals)
+	assert.Equal(t, models.TierDependent, got.Tier,
+		"a saturated user is the clearest dependency case; score=%d", got.Score)
 }
 
 func TestScoreDependency_EscalationIsDetected(t *testing.T) {

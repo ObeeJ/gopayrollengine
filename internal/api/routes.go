@@ -44,7 +44,7 @@ func SetupRouter() *gin.Engine {
 	empHandler        := handlers.NewEmployeeHandler(empRepo)
 	payrollHandler    := &handlers.PayrollHandler{Service: services.NewPayrollService(payrollRepo, empRepo)}
 	analyticsHandler  := &handlers.AnalyticsHandler{Service: services.NewAnalyticsService(payrollRepo, empRepo)}
-	advanceHandler    := handlers.NewAdvanceHandler(empRepo)
+	advanceHandler    := handlers.NewAdvanceHandler(services.NewEWAService())
 	webhookHandler    := &handlers.WebhookHandler{}
 	consentHandler    := &handlers.ConsentHandler{}
 	complianceHandler := &handlers.ComplianceHandler{}

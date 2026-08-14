@@ -3,6 +3,7 @@ package workers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go-payroll-engine/internal/integrations/monnify"
 	"go-payroll-engine/internal/models"
@@ -37,17 +38,57 @@ func (h *PayrollHandler) ProcessPayrollTask(ctx context.Context, t *asynq.Task) 
 	orgID := payload["org_id"]
 	log.Printf("Processing payroll %s for org %s", payrollID, orgID)
 
-	// Phase 1 — load, CAS-transition, set counter, fetch employees in one RLS-scoped tx.
+	// Phase 1 — load, partition, CAS-transition, set counter, fetch employees in one RLS-scoped tx.
 	var payroll models.Payroll
 	var employees []models.Employee
+	var sendable []models.PayrollItem
 
 	if err := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
 		if err := tx.Preload("Items").First(&payroll, "id = ?", payrollID).Error; err != nil {
 			return err
 		}
 
-		// Atomic FSM+counter CAS before Monnify call — closes counter race and duplicate-task race; failed is allowed for retries.
-		itemCount := len(payroll.Items)
+		// Only items that have NOT reached a terminal state may be submitted. The
+		// failed→processing retry edge means a batch can re-enter this worker while
+		// carrying items Monnify already settled; re-sending those disburses twice.
+		unsettled := make([]models.PayrollItem, 0, len(payroll.Items))
+		for _, item := range payroll.Items {
+			if item.Status == models.PayrollPending {
+				unsettled = append(unsettled, item)
+			}
+		}
+
+		// One query for all employees — the N+1 killer.
+		employeeIDs := make([]string, 0, len(unsettled))
+		for _, item := range unsettled {
+			employeeIDs = append(employeeIDs, item.EmployeeID)
+		}
+		if len(employeeIDs) > 0 {
+			if err := tx.Where("id IN ?", employeeIDs).Find(&employees).Error; err != nil {
+				return err
+			}
+		}
+		empMap := make(map[string]models.Employee, len(employees))
+		for _, emp := range employees {
+			empMap[emp.ID] = emp
+		}
+
+		// An item whose employee has vanished can never produce a webhook. Counting
+		// it in pending_count would strand the batch in processing forever, so it is
+		// failed here and excluded from the counter.
+		sendable = sendable[:0]
+		orphaned := make([]string, 0)
+		for _, item := range unsettled {
+			if _, ok := empMap[item.EmployeeID]; !ok {
+				orphaned = append(orphaned, item.ID)
+				continue
+			}
+			sendable = append(sendable, item)
+		}
+
+		// Atomic FSM+counter CAS before the Monnify call — closes the counter race and
+		// the duplicate-task race. pending_count counts only items that can still
+		// decrement it, so the batch can always reach zero.
 		res := tx.Exec(
 			`UPDATE payrolls
 			    SET status        = ?,
@@ -55,7 +96,7 @@ func (h *PayrollHandler) ProcessPayrollTask(ctx context.Context, t *asynq.Task) 
 			        updated_at    = NOW()
 			  WHERE id     = ?
 			    AND status IN (?, ?)`,
-			models.PayrollProcessing, itemCount, payrollID,
+			models.PayrollProcessing, len(sendable), payrollID,
 			models.PayrollPending, models.PayrollFailed,
 		)
 		if res.Error != nil {
@@ -66,17 +107,36 @@ func (h *PayrollHandler) ProcessPayrollTask(ctx context.Context, t *asynq.Task) 
 			return fmt.Errorf("payroll %s not retryable: %w", payrollID, models.ErrStaleStatus)
 		}
 		payroll.Status = models.PayrollProcessing
-		payroll.PendingCount = itemCount
+		payroll.PendingCount = len(sendable)
 
-		// One query for all employees — the N+1 killer.
-		employeeIDs := make([]string, 0, len(payroll.Items))
-		for _, item := range payroll.Items {
-			employeeIDs = append(employeeIDs, item.EmployeeID)
+		if len(orphaned) > 0 {
+			log.Printf("payroll %s: %d item(s) have no employee record — failing them", payrollID, len(orphaned))
+			if err := tx.Model(&models.PayrollItem{}).
+				Where("id IN ? AND status = ?", orphaned, models.PayrollPending).
+				Updates(map[string]interface{}{
+					"status":        models.PayrollFailed,
+					"error_message": "employee record not found at disbursement time",
+				}).Error; err != nil {
+				return fmt.Errorf("payroll %s: failed to mark orphaned items: %w", payrollID, err)
+			}
 		}
-		return tx.Where("id IN ?", employeeIDs).Find(&employees).Error
+		return nil
 	}); err != nil {
 		observability.WorkerTasksTotal.WithLabelValues(TypeProcessPayroll, "error").Inc()
 		return err
+	}
+
+	// Nothing left to disburse — resolve the batch here; no webhook will ever arrive.
+	if len(sendable) == 0 {
+		log.Printf("payroll %s has no sendable items — reconciling without a Monnify call", payrollID)
+		if err := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
+			return finalizePayroll(tx, orgID, payrollID)
+		}); err != nil {
+			observability.WorkerTasksTotal.WithLabelValues(TypeProcessPayroll, "error").Inc()
+			return err
+		}
+		observability.WorkerTasksTotal.WithLabelValues(TypeProcessPayroll, "success").Inc()
+		return nil
 	}
 
 	// Hash map: O(1) employee lookup per item instead of O(N) scans.
@@ -85,14 +145,10 @@ func (h *PayrollHandler) ProcessPayrollTask(ctx context.Context, t *asynq.Task) 
 		empMap[emp.ID] = emp
 	}
 
-	// Build the Monnify payload — one line per employee, one API call for all of them.
-	var transactionList []monnify.TransferDetail
-	for _, item := range payroll.Items {
-		emp, ok := empMap[item.EmployeeID]
-		if !ok {
-			log.Printf("employee %s missing for item %s — skipping", item.EmployeeID, item.ID)
-			continue
-		}
+	// Build the Monnify payload — one line per sendable item, one API call for all of them.
+	transactionList := make([]monnify.TransferDetail, 0, len(sendable))
+	for _, item := range sendable {
+		emp := empMap[item.EmployeeID]
 		transactionList = append(transactionList, monnify.TransferDetail{
 			// Convert Kobo → Naira exactly once, at the Monnify wire boundary.
 			Amount:        item.Amount.Naira(),
@@ -134,6 +190,39 @@ func (h *PayrollHandler) ProcessPayrollTask(ctx context.Context, t *asynq.Task) 
 	observability.PayrollProcessingDuration.WithLabelValues(orgID).Observe(time.Since(start).Seconds())
 	observability.WorkerTasksTotal.WithLabelValues(TypeProcessPayroll, "success").Inc()
 	observability.PayrollsCreatedTotal.WithLabelValues(orgID, "processing").Inc()
-	log.Printf("Payroll %s handed to Monnify — %d webhooks incoming", payrollID, len(payroll.Items))
+	log.Printf("Payroll %s handed to Monnify — %d webhooks incoming", payrollID, len(sendable))
 	return nil
+}
+
+// finalizePayroll resolves a batch that will never receive another webhook: it
+// picks completed/failed from the item statuses and CAS-transitions the parent.
+// Used when every item is already settled or unsendable.
+func finalizePayroll(tx *gorm.DB, orgID, payrollID string) error {
+	var payroll models.Payroll
+	if err := tx.First(&payroll, "id = ?", payrollID).Error; err != nil {
+		return err
+	}
+
+	var failedCount int64
+	if err := tx.Model(&models.PayrollItem{}).
+		Where("payroll_id = ? AND status = ?", payrollID, models.PayrollFailed).
+		Count(&failedCount).Error; err != nil {
+		return err
+	}
+
+	next := models.PayrollCompleted
+	if failedCount > 0 {
+		next = models.PayrollFailed
+	}
+
+	if err := models.TransitionStatus(tx, &payroll, payroll.Status, next); err != nil {
+		// A concurrent webhook already resolved the batch — that outcome stands.
+		if errors.Is(err, models.ErrStaleStatus) {
+			return nil
+		}
+		return err
+	}
+
+	return models.AppendAuditTx(tx, orgID, "Payroll", payrollID, "reconciled",
+		string(payroll.Status), string(next), "internal", "")
 }

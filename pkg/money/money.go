@@ -30,8 +30,21 @@ var ErrInvalidFormat = errors.New("money: invalid naira string format")
 var ErrOverflow = errors.New("money: arithmetic overflow")
 
 // FromNaira returns Kobo for a whole-Naira amount.
+//
+// Precondition: naira must be within ±(MaxInt64/100). This exists for literals
+// and other compile-time-bounded values; anything derived from user input or an
+// upstream API must go through FromNairaChecked or FromNairaString, which report
+// overflow instead of wrapping.
 func FromNaira(naira int64) Kobo {
 	return Kobo(naira * KoboPerNaira)
+}
+
+// FromNairaChecked is FromNaira with overflow detection, for untrusted input.
+func FromNairaChecked(naira int64) (Kobo, error) {
+	if naira > math.MaxInt64/KoboPerNaira || naira < math.MinInt64/KoboPerNaira {
+		return 0, ErrOverflow
+	}
+	return Kobo(naira * KoboPerNaira), nil
 }
 
 // FromNairaString parses a decimal Naira string into Kobo — at most two fractional digits.
@@ -69,6 +82,11 @@ func FromNairaString(s string) (Kobo, error) {
 		}
 	}
 
+	// Overflow-check before scaling — this path is reachable from request bodies
+	// via Kobo.UnmarshalJSON, so a wrapped multiply here is attacker-controlled.
+	if whole > (math.MaxInt64-fraction)/KoboPerNaira {
+		return 0, ErrOverflow
+	}
 	total := whole*KoboPerNaira + fraction
 	if negative {
 		total = -total
@@ -137,8 +155,10 @@ func withThousandsSep(n int64) string {
 // Add returns k + other with overflow detection.
 func (k Kobo) Add(other Kobo) (Kobo, error) {
 	result := k + other
-	// Overflow detection for signed addition: sign of result differs from both operands.
-	if (k > 0 && other > 0 && result < 0) || (k < 0 && other < 0 && result > 0) {
+	// Adding a positive must move the value up, adding a negative must move it
+	// down. Any other outcome wrapped. This form also catches MinInt64+MinInt64,
+	// which a sign-comparison check misses because the result is exactly zero.
+	if (other > 0 && result < k) || (other < 0 && result > k) {
 		return 0, ErrOverflow
 	}
 	return result, nil
@@ -154,8 +174,15 @@ func (k Kobo) MustAdd(other Kobo) Kobo {
 }
 
 // Sub returns k - other with overflow detection.
+//
+// Computed directly rather than as Add(-other): negating MinInt64 wraps back to
+// MinInt64, which would turn a subtraction into an addition.
 func (k Kobo) Sub(other Kobo) (Kobo, error) {
-	return k.Add(-other)
+	result := k - other
+	if (other < 0 && result < k) || (other > 0 && result > k) {
+		return 0, ErrOverflow
+	}
+	return result, nil
 }
 
 // MulInt multiplies by an integer scalar with overflow detection.

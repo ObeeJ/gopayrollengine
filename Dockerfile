@@ -13,7 +13,20 @@
 # provenance metadata required by SOC 2 and a typical container scanner.
 
 # ---------- build stage ---------------------------------------------------
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+# Go 1.26, not 1.25: CVE-2026-46600 (DoS parsing invalid DNS records) lives in
+# the copy of golang.org/x/net/dns/dnsmessage that Go vendors into its own
+# standard library. It is fixed in 1.26.6 with no 1.25.x backport — 1.25.13 is
+# the newest 1.25 and is still affected, so bumping the x/net module does not
+# clear it. Only the toolchain does.
+#
+# This is not merely scanner hygiene: the build below sets -tags netgo, which
+# selects Go's pure-Go resolver, so the vendored dnsmessage parser really is on
+# this binary's DNS path.
+#
+# go.mod deliberately stays at `go 1.25.0`. Go 1.26 builds it forward
+# compatibly, while the CI lint and test jobs — which take their toolchain from
+# go.mod — keep running on 1.25.0, where the pinned gosec builds.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
 WORKDIR /src
 

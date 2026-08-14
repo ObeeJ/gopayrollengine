@@ -32,9 +32,13 @@ CREATE TABLE IF NOT EXISTS ewa_worker_preferences (
     protected_payday_minor BIGINT NOT NULL DEFAULT 0
                            CHECK (protected_payday_minor >= 0),
 
-    -- When the floor was last LOWERED. Raising it does not set this, so raising
-    -- is never rate-limited.
-    last_lowered_at       TIMESTAMPTZ,
+    -- When this floor was last CHANGED, in either direction. Set on every
+    -- write, not only on a lowering. This is what the cooling-off check on a
+    -- lowering compares against — using "last time it was lowered" instead
+    -- would leave the very first lowering after a raise unprotected, since
+    -- there would be no prior lowering to rate-limit against. Raising itself
+    -- is never blocked by this column; it only gates a subsequent lowering.
+    last_changed_at       TIMESTAMPTZ,
 
     created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),

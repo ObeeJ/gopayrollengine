@@ -196,7 +196,10 @@ type EWAWorkerPreference struct {
 	EmployeeID     string `gorm:"primaryKey" json:"employee_id"`
 
 	ProtectedPaydayMinor int64      `gorm:"column:protected_payday_minor" json:"protected_payday_minor"`
-	LastLoweredAt        *time.Time `json:"last_lowered_at,omitempty"`
+	// LastChangedAt is set on every write, raise or lower alike. A lowering
+	// attempt is rate-limited against it — not against "last time it was
+	// lowered" — so the first lowering after a raise is still protected.
+	LastChangedAt *time.Time `json:"last_changed_at,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

@@ -114,6 +114,7 @@ func SetupRouter() *gin.Engine {
 			worker.GET("/wages", advanceHandler.GetEarnedWages)
 			worker.POST("/advances", advanceHandler.RequestAdvance)
 			worker.GET("/advances", advanceHandler.GetAdvanceHistory)
+			worker.POST("/protected-payday", advanceHandler.SetProtectedPayday)
 		}
 	}
 

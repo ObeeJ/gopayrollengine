@@ -553,8 +553,11 @@ func TestEligibility_ProjectsThePaycheckConsequence(t *testing.T) {
 	assert.Less(t, int64(el.ProjectedPaydayIfMaxDrawn), int64(el.ProjectedPayday))
 }
 
-// After a draw, the projected payday must fall by the drawn amount — the number
-// the worker is most likely to be surprised by has to stay truthful.
+// After a DISBURSED draw, the projected payday must fall by the drawn amount —
+// the number the worker is most likely to be surprised by has to stay truthful.
+// (An approved-but-undisbursed draw must NOT move this number — see
+// TestEligibility_ProjectedPaydayExcludesUndisbursedAdvances below, and the
+// comment on outstandingTx.)
 func TestEligibility_ProjectedPaydayFallsAfterDrawing(t *testing.T) {
 	skipIfNoDB(t)
 	salary := money.FromNaira(300_000)
@@ -562,9 +565,10 @@ func TestEligibility_ProjectedPaydayFallsAfterDrawing(t *testing.T) {
 	svc := NewEWAService()
 
 	drawn := money.FromNaira(5_000)
-	_, _, err := svc.RequestAdvance(
+	advance, _, err := svc.RequestAdvance(
 		context.Background(), orgID, employeeID, drawn, "proj-1", "127.0.0.1")
 	require.NoError(t, err)
+	markDisbursed(t, orgID, advance.ID)
 
 	el, err := svc.GetEligibility(context.Background(), orgID, employeeID, time.Now())
 	require.NoError(t, err)
@@ -572,5 +576,131 @@ func TestEligibility_ProjectedPaydayFallsAfterDrawing(t *testing.T) {
 	expected, err := salary.Sub(drawn)
 	require.NoError(t, err)
 	assert.Equal(t, expected, el.ProjectedPayday,
-		"projected payday must reflect what has already been taken")
+		"projected payday must reflect what has already been disbursed")
+}
+
+// Codex review on PR #4: an approved-but-undisbursed advance is cancelled by
+// settlement, not deducted (see SettleAdvancesForPayrollItem). The payday
+// projection must reflect that — counting it as a deduction would show the
+// worker a smaller number than payroll will actually pay.
+func TestEligibility_ProjectedPaydayExcludesUndisbursedAdvances(t *testing.T) {
+	skipIfNoDB(t)
+	salary := money.FromNaira(300_000)
+	orgID, employeeID := seedWorker(t, salary)
+	svc := NewEWAService()
+
+	drawn := money.FromNaira(5_000)
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, drawn, "proj-undisbursed", "127.0.0.1")
+	require.NoError(t, err)
+	require.Equal(t, models.AdvanceApproved, advance.Status, "left undisbursed on purpose")
+
+	el, err := svc.GetEligibility(context.Background(), orgID, employeeID, time.Now())
+	require.NoError(t, err)
+
+	assert.Equal(t, salary, el.ProjectedPayday,
+		"an undisbursed advance must not reduce the payday projection — it will be cancelled, not deducted")
+
+	// But it must still count against this period's allowance: it is a
+	// committed draw even though it has not moved money yet.
+	assert.Equal(t, drawn, el.Outstanding,
+		"an approved advance must still shrink the available cap")
+}
+
+// Once disbursed, the same advance DOES belong in the projection, because
+// settlement will actually deduct it.
+func TestEligibility_ProjectedPaydayIncludesDisbursedAdvances(t *testing.T) {
+	skipIfNoDB(t)
+	salary := money.FromNaira(300_000)
+	orgID, employeeID := seedWorker(t, salary)
+	svc := NewEWAService()
+
+	drawn := money.FromNaira(5_000)
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, drawn, "proj-disbursed", "127.0.0.1")
+	require.NoError(t, err)
+	markDisbursed(t, orgID, advance.ID)
+
+	el, err := svc.GetEligibility(context.Background(), orgID, employeeID, time.Now())
+	require.NoError(t, err)
+
+	expected, err := salary.Sub(drawn)
+	require.NoError(t, err)
+	assert.Equal(t, expected, el.ProjectedPayday,
+		"a disbursed advance must reduce the payday projection")
+}
+
+// --- Worker-set floor: SetProtectedPayday ------------------------------------
+
+func TestSetProtectedPayday_RaisingIsImmediate(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	pref, err := svc.SetProtectedPayday(
+		context.Background(), orgID, employeeID, money.FromNaira(50_000), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, money.FromNaira(50_000), pref.ProtectedPayday())
+
+	// Raise again immediately — must not be rate-limited, even though
+	// LastChangedAt was just set by the previous call. The rate limit only
+	// ever gates a LOWERING attempt; raising is never blocked by it.
+	pref, err = svc.SetProtectedPayday(
+		context.Background(), orgID, employeeID, money.FromNaira(100_000), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, money.FromNaira(100_000), pref.ProtectedPayday())
+}
+
+// The mechanism only works if lowering can't be done in the moment of
+// temptation. Without this test the rate limit could silently regress to a
+// no-op and the floor would be decorative.
+//
+// This also covers the case that matters most: the limit must bind on the
+// FIRST lowering after a raise, not only a second-or-later one. Gating on
+// "last time it was lowered" rather than "last time it changed at all" would
+// leave exactly this sequence unprotected, since there would be no prior
+// lowering to compare against.
+func TestSetProtectedPayday_LoweringIsRateLimited(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+	now := time.Now()
+
+	_, err := svc.SetProtectedPayday(context.Background(), orgID, employeeID, money.FromNaira(100_000), now)
+	require.NoError(t, err)
+
+	// Immediately try to lower it — must be refused, even though this is the
+	// FIRST lowering attempt ever for this worker.
+	_, err = svc.SetProtectedPayday(context.Background(), orgID, employeeID, money.FromNaira(10_000), now)
+	require.ErrorIs(t, err, ErrFloorLoweringRateLimited)
+
+	// After the org's cooling-off window has elapsed, lowering succeeds.
+	policy := models.DefaultEWAPolicy(orgID)
+	later := now.Add(time.Duration(policy.CoolingOffHours)*time.Hour + time.Minute)
+	pref, err := svc.SetProtectedPayday(context.Background(), orgID, employeeID, money.FromNaira(10_000), later)
+	require.NoError(t, err)
+	assert.Equal(t, money.FromNaira(10_000), pref.ProtectedPayday())
+	require.NotNil(t, pref.LastChangedAt)
+}
+
+// A lowering, once allowed through, resets the clock: a worker cannot lower
+// the floor, wait out the cooldown, then chain a second lowering immediately.
+func TestSetProtectedPayday_ConsecutiveLoweringsAreEachRateLimited(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+	policy := models.DefaultEWAPolicy(orgID)
+	cooldown := time.Duration(policy.CoolingOffHours) * time.Hour
+
+	t0 := time.Now()
+	_, err := svc.SetProtectedPayday(context.Background(), orgID, employeeID, money.FromNaira(100_000), t0)
+	require.NoError(t, err)
+
+	t1 := t0.Add(cooldown + time.Minute)
+	_, err = svc.SetProtectedPayday(context.Background(), orgID, employeeID, money.FromNaira(50_000), t1)
+	require.NoError(t, err, "first lowering after cooldown must succeed")
+
+	_, err = svc.SetProtectedPayday(context.Background(), orgID, employeeID, money.FromNaira(10_000), t1.Add(time.Minute))
+	require.ErrorIs(t, err, ErrFloorLoweringRateLimited,
+		"each lowering must reset the cooling-off clock")
 }

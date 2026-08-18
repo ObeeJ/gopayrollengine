@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -41,7 +42,12 @@ func (p MonnifyWebhookPayload) disbursedKobo() (money.Kobo, error) {
 	return money.FromNairaString(p.EventData.Amount.String())
 }
 
-// HandleMonnifyWebhook — verifies HMAC, dedupes via bloom + DB, transitions the item, reconciles the parent.
+// HandleMonnifyWebhook — verifies HMAC, dedupes via bloom, then routes to the
+// payroll-item or EWA-advance handler by the reference's ID prefix. One
+// endpoint for both record types because Monnify's callback shape is
+// identical either way — the only thing that differs is which table the
+// reference belongs to, and this codebase already names every row with a
+// type-tagged prefix ("ITEM-", "EWA-") for exactly this kind of dispatch.
 func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 	secret := os.Getenv("MONNIFY_SECRET_KEY")
 	signature := c.GetHeader("monnify-signature")
@@ -84,6 +90,16 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 		}
 	}
 
+	if strings.HasPrefix(ref, "EWA-") {
+		h.handleEWAAdvanceWebhook(c, payload, ref)
+		return
+	}
+	h.handlePayrollItemWebhook(c, payload, ref)
+}
+
+// handlePayrollItemWebhook processes a disbursement callback for one payroll
+// batch item.
+func (h *WebhookHandler) handlePayrollItemWebhook(c *gin.Context, payload MonnifyWebhookPayload, ref string) {
 	// SECURITY DEFINER lookup (migration 000011) — we don't know the orgID yet, HMAC already vouched for the ref.
 	var item models.PayrollItem
 	if err := models.DB.Raw(
@@ -205,14 +221,118 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 		return
 	}
 
-	// Mark this ref in the bloom filter so future duplicates skip the DB.
-	if middleware.WebhookBloom != nil {
-		if err := middleware.WebhookBloom.Add(context.Background(), ref); err != nil {
-			middleware.Logger.Warn("bloom filter add failed", "ref", ref, "error", err.Error())
-		}
+	markSeen(ref)
+	c.Status(http.StatusOK)
+}
+
+// handleEWAAdvanceWebhook processes a disbursement callback for one EWA
+// advance. Mirrors handlePayrollItemWebhook's shape deliberately — same
+// lookup-before-scoping problem, same FSM-CAS-then-audit structure — but
+// against ewa_advances instead of payroll_items, and with the two outcomes
+// mapped onto the advance FSM's own edges (Approved→Disbursed on success,
+// Approved→Cancelled, reversing the ledger, on failure) rather than payroll's.
+func (h *WebhookHandler) handleEWAAdvanceWebhook(c *gin.Context, payload MonnifyWebhookPayload, ref string) {
+	// SECURITY DEFINER lookup (migration 000017) — same justification as
+	// lookup_payroll_item_for_webhook: HMAC already authenticated the request,
+	// and every write below runs inside WithOrgScope using the org_id this
+	// lookup reveals.
+	var advance models.EWAAdvance
+	if err := models.DB.Raw(
+		"SELECT * FROM lookup_ewa_advance_for_webhook(?)", ref,
+	).Scan(&advance).Error; err != nil || advance.ID == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Advance not found"})
+		return
 	}
 
+	// DB idempotency — a webhook for an advance already past Approved (settled,
+	// cancelled, disbursed by a prior delivery of this same event) is a
+	// duplicate. Return 200 so Monnify stops retrying.
+	if advance.Status != models.AdvanceApproved {
+		c.Status(http.StatusOK)
+		return
+	}
+
+	orgID := advance.OrganizationID
+
+	switch payload.EventType {
+	case "DISBURSEMENT_SUCCESSFUL":
+		disbursed, convErr := payload.disbursedKobo()
+		if convErr != nil {
+			middleware.Logger.Error("ewa webhook amount unparseable",
+				"advance_id", advance.ID, "raw", payload.EventData.Amount.String(), "error", convErr.Error())
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid amount"})
+			return
+		}
+		if disbursed != advance.AmountKobo {
+			observability.WebhookAmountMismatchTotal.WithLabelValues(orgID).Inc()
+			middleware.Logger.Error("CRITICAL: ewa webhook amount does not match advance amount",
+				"advance_id", advance.ID,
+				"expected_kobo", int64(advance.AmountKobo),
+				"reported_kobo", int64(disbursed),
+			)
+			if auditErr := models.WithOrgScope(c.Request.Context(), orgID, func(tx *gorm.DB) error {
+				return models.AppendAuditTx(tx, orgID, "EWAAdvance", advance.ID, "amount_mismatch",
+					advance.AmountKobo.String(), disbursed.String(), c.ClientIP(), "")
+			}); auditErr != nil {
+				middleware.Logger.Error("ewa amount mismatch audit write failed",
+					"advance_id", advance.ID, "error", auditErr.Error())
+			}
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "amount mismatch"})
+			return
+		}
+
+		if err := models.WithOrgScope(c.Request.Context(), orgID, func(tx *gorm.DB) error {
+			if err := models.ConfirmDisbursed(tx, &advance); err != nil {
+				if errors.Is(err, models.ErrStaleStatus) {
+					return nil // a concurrent delivery of this event already won
+				}
+				return err
+			}
+			return nil
+		}); err != nil {
+			middleware.Logger.Error("ewa disbursement confirmation failed",
+				"advance_id", advance.ID, "error", err.Error())
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "webhook processing failed"})
+			return
+		}
+
+	case "DISBURSEMENT_FAILED":
+		// Provider accepted the transfer, then reported it did not complete — cash
+		// never actually left, so this reverses exactly like an advance cancelled
+		// at settlement time for never having been disbursed at all.
+		if err := models.WithOrgScope(c.Request.Context(), orgID, func(tx *gorm.DB) error {
+			if err := models.CancelAdvance(tx, &advance, models.AdvanceApproved, "provider_disbursement_failed"); err != nil {
+				if errors.Is(err, models.ErrStaleStatus) {
+					return nil
+				}
+				return err
+			}
+			return nil
+		}); err != nil {
+			middleware.Logger.Error("ewa disbursement failure handling failed",
+				"advance_id", advance.ID, "error", err.Error())
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "webhook processing failed"})
+			return
+		}
+
+	default:
+		c.Status(http.StatusOK)
+		return
+	}
+
+	markSeen(ref)
 	c.Status(http.StatusOK)
+}
+
+// markSeen records ref in the bloom filter so future duplicate deliveries of
+// the same event skip straight past the DB lookup.
+func markSeen(ref string) {
+	if middleware.WebhookBloom == nil {
+		return
+	}
+	if err := middleware.WebhookBloom.Add(context.Background(), ref); err != nil {
+		middleware.Logger.Warn("bloom filter add failed", "ref", ref, "error", err.Error())
+	}
 }
 
 // reconcilePayrollStatus — called once per batch when pending_count hits zero; CAS UPDATE makes races a no-op.

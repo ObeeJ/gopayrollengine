@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go-payroll-engine/internal/models"
+	"go-payroll-engine/internal/workers"
 	"go-payroll-engine/pkg/money"
 
 	"github.com/google/uuid"
@@ -29,6 +30,15 @@ func TestMain(m *testing.M) {
 	}
 	models.DB = db
 	models.InitEncryption()
+
+	// RequestAdvance enqueues a disbursement task after commit, so this suite
+	// needs a real Asynq client wired to a reachable Redis — without it,
+	// workers.Client stays nil and the enqueue call panics the first time any
+	// test here calls RequestAdvance. REDIS_URL matches the CI redis service
+	// and any local Redis started for this suite.
+	workers.InitAsynqClient()
+	defer workers.CloseAsynqClient()
+
 	os.Exit(m.Run())
 }
 
@@ -491,4 +501,354 @@ func TestEWAAdvances_OwnScopeStillReadable(t *testing.T) {
 		assert.Len(t, entries, 2, "org A must see both sides of its own posting")
 		return nil
 	}))
+}
+
+// setProtectedPayday records a worker-set floor.
+func setProtectedPayday(t *testing.T, orgID, employeeID string, protect money.Kobo) {
+	t.Helper()
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return tx.Save(&models.EWAWorkerPreference{
+			OrganizationID:       orgID,
+			EmployeeID:           employeeID,
+			ProtectedPaydayMinor: int64(protect),
+		}).Error
+	}))
+}
+
+// A worker's own floor must cap access even when policy and tier would allow
+// more. This is the one guardrail whose legitimacy does not depend on the
+// dependency model being correct, so it must be the one that binds hardest.
+func TestEligibility_WorkerFloorCapsAvailable(t *testing.T) {
+	skipIfNoDB(t)
+	salary := money.FromNaira(300_000)
+	orgID, employeeID := seedWorker(t, salary)
+	svc := NewEWAService()
+
+	before, err := svc.GetEligibility(context.Background(), orgID, employeeID, time.Now())
+	require.NoError(t, err)
+	require.True(t, before.Available.IsPositive(), "expected headroom before the floor is set")
+
+	// Ask to protect nearly the whole salary, leaving only N10,000 spendable.
+	setProtectedPayday(t, orgID, employeeID, money.FromNaira(290_000))
+
+	after, err := svc.GetEligibility(context.Background(), orgID, employeeID, time.Now())
+	require.NoError(t, err)
+
+	assert.Equal(t, money.FromNaira(290_000), after.ProtectedPayday)
+	assert.LessOrEqual(t, int64(after.Available), int64(money.FromNaira(10_000)),
+		"the worker's floor must bind even though the policy cap is higher")
+	assert.Less(t, int64(after.Available), int64(before.Available),
+		"setting a floor must reduce available, not merely be recorded")
+}
+
+// The UK evidence is that users grasp "money available now" but are surprised by
+// the smaller paycheck. Both numbers must be present and internally consistent.
+func TestEligibility_ProjectsThePaycheckConsequence(t *testing.T) {
+	skipIfNoDB(t)
+	salary := money.FromNaira(300_000)
+	orgID, employeeID := seedWorker(t, salary)
+	svc := NewEWAService()
+
+	el, err := svc.GetEligibility(context.Background(), orgID, employeeID, time.Now())
+	require.NoError(t, err)
+
+	// Nothing drawn yet, so the projected payday is the whole salary.
+	assert.Equal(t, salary, el.ProjectedPayday)
+
+	// Drawing the full allowance must reduce payday by exactly that allowance.
+	expected, err := el.ProjectedPayday.Sub(el.Available)
+	require.NoError(t, err)
+	assert.Equal(t, expected, el.ProjectedPaydayIfMaxDrawn,
+		"worst-case payday must equal payday minus everything still drawable")
+	assert.Less(t, int64(el.ProjectedPaydayIfMaxDrawn), int64(el.ProjectedPayday))
+}
+
+// After a DISBURSED draw, the projected payday must fall by the drawn amount —
+// the number the worker is most likely to be surprised by has to stay truthful.
+// (An approved-but-undisbursed draw must NOT move this number — see
+// TestEligibility_ProjectedPaydayExcludesUndisbursedAdvances below, and the
+// comment on outstandingTx.)
+func TestEligibility_ProjectedPaydayFallsAfterDrawing(t *testing.T) {
+	skipIfNoDB(t)
+	salary := money.FromNaira(300_000)
+	orgID, employeeID := seedWorker(t, salary)
+	svc := NewEWAService()
+
+	drawn := money.FromNaira(5_000)
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, drawn, "proj-1", "127.0.0.1")
+	require.NoError(t, err)
+	markDisbursed(t, orgID, advance.ID)
+
+	el, err := svc.GetEligibility(context.Background(), orgID, employeeID, time.Now())
+	require.NoError(t, err)
+
+	expected, err := salary.Sub(drawn)
+	require.NoError(t, err)
+	assert.Equal(t, expected, el.ProjectedPayday,
+		"projected payday must reflect what has already been disbursed")
+}
+
+// Codex review on PR #4: an approved-but-undisbursed advance is cancelled by
+// settlement, not deducted (see SettleAdvancesForPayrollItem). The payday
+// projection must reflect that — counting it as a deduction would show the
+// worker a smaller number than payroll will actually pay.
+func TestEligibility_ProjectedPaydayExcludesUndisbursedAdvances(t *testing.T) {
+	skipIfNoDB(t)
+	salary := money.FromNaira(300_000)
+	orgID, employeeID := seedWorker(t, salary)
+	svc := NewEWAService()
+
+	drawn := money.FromNaira(5_000)
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, drawn, "proj-undisbursed", "127.0.0.1")
+	require.NoError(t, err)
+	require.Equal(t, models.AdvanceApproved, advance.Status, "left undisbursed on purpose")
+
+	el, err := svc.GetEligibility(context.Background(), orgID, employeeID, time.Now())
+	require.NoError(t, err)
+
+	assert.Equal(t, salary, el.ProjectedPayday,
+		"an undisbursed advance must not reduce the payday projection — it will be cancelled, not deducted")
+
+	// But it must still count against this period's allowance: it is a
+	// committed draw even though it has not moved money yet.
+	assert.Equal(t, drawn, el.Outstanding,
+		"an approved advance must still shrink the available cap")
+}
+
+// Once disbursed, the same advance DOES belong in the projection, because
+// settlement will actually deduct it.
+func TestEligibility_ProjectedPaydayIncludesDisbursedAdvances(t *testing.T) {
+	skipIfNoDB(t)
+	salary := money.FromNaira(300_000)
+	orgID, employeeID := seedWorker(t, salary)
+	svc := NewEWAService()
+
+	drawn := money.FromNaira(5_000)
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, drawn, "proj-disbursed", "127.0.0.1")
+	require.NoError(t, err)
+	markDisbursed(t, orgID, advance.ID)
+
+	el, err := svc.GetEligibility(context.Background(), orgID, employeeID, time.Now())
+	require.NoError(t, err)
+
+	expected, err := salary.Sub(drawn)
+	require.NoError(t, err)
+	assert.Equal(t, expected, el.ProjectedPayday,
+		"a disbursed advance must reduce the payday projection")
+}
+
+// --- Worker-set floor: SetProtectedPayday ------------------------------------
+
+func TestSetProtectedPayday_RaisingIsImmediate(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	pref, err := svc.SetProtectedPayday(
+		context.Background(), orgID, employeeID, money.FromNaira(50_000), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, money.FromNaira(50_000), pref.ProtectedPayday())
+
+	// Raise again immediately — must not be rate-limited, even though
+	// LastChangedAt was just set by the previous call. The rate limit only
+	// ever gates a LOWERING attempt; raising is never blocked by it.
+	pref, err = svc.SetProtectedPayday(
+		context.Background(), orgID, employeeID, money.FromNaira(100_000), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, money.FromNaira(100_000), pref.ProtectedPayday())
+}
+
+// The mechanism only works if lowering can't be done in the moment of
+// temptation. Without this test the rate limit could silently regress to a
+// no-op and the floor would be decorative.
+//
+// This also covers the case that matters most: the limit must bind on the
+// FIRST lowering after a raise, not only a second-or-later one. Gating on
+// "last time it was lowered" rather than "last time it changed at all" would
+// leave exactly this sequence unprotected, since there would be no prior
+// lowering to compare against.
+func TestSetProtectedPayday_LoweringIsRateLimited(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+	now := time.Now()
+
+	_, err := svc.SetProtectedPayday(context.Background(), orgID, employeeID, money.FromNaira(100_000), now)
+	require.NoError(t, err)
+
+	// Immediately try to lower it — must be refused, even though this is the
+	// FIRST lowering attempt ever for this worker.
+	_, err = svc.SetProtectedPayday(context.Background(), orgID, employeeID, money.FromNaira(10_000), now)
+	require.ErrorIs(t, err, ErrFloorLoweringRateLimited)
+
+	// After the org's cooling-off window has elapsed, lowering succeeds.
+	policy := models.DefaultEWAPolicy(orgID)
+	later := now.Add(time.Duration(policy.CoolingOffHours)*time.Hour + time.Minute)
+	pref, err := svc.SetProtectedPayday(context.Background(), orgID, employeeID, money.FromNaira(10_000), later)
+	require.NoError(t, err)
+	assert.Equal(t, money.FromNaira(10_000), pref.ProtectedPayday())
+	require.NotNil(t, pref.LastChangedAt)
+}
+
+// A lowering, once allowed through, resets the clock: a worker cannot lower
+// the floor, wait out the cooldown, then chain a second lowering immediately.
+func TestSetProtectedPayday_ConsecutiveLoweringsAreEachRateLimited(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+	policy := models.DefaultEWAPolicy(orgID)
+	cooldown := time.Duration(policy.CoolingOffHours) * time.Hour
+
+	t0 := time.Now()
+	_, err := svc.SetProtectedPayday(context.Background(), orgID, employeeID, money.FromNaira(100_000), t0)
+	require.NoError(t, err)
+
+	t1 := t0.Add(cooldown + time.Minute)
+	_, err = svc.SetProtectedPayday(context.Background(), orgID, employeeID, money.FromNaira(50_000), t1)
+	require.NoError(t, err, "first lowering after cooldown must succeed")
+
+	_, err = svc.SetProtectedPayday(context.Background(), orgID, employeeID, money.FromNaira(10_000), t1.Add(time.Minute))
+	require.ErrorIs(t, err, ErrFloorLoweringRateLimited,
+		"each lowering must reset the cooling-off clock")
+}
+
+// --- Disbursement primitives: models.MarkSubmittedToProvider / ConfirmDisbursed / CancelAdvance ---
+
+func TestMarkSubmittedToProvider_RecordsReferenceWithoutTransitioning(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, money.FromNaira(5_000), "submit-1", "127.0.0.1")
+	require.NoError(t, err)
+	require.Equal(t, models.AdvanceApproved, advance.Status)
+
+	ref := "MNFY-REF-" + uuid.New().String()[:8]
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return models.MarkSubmittedToProvider(tx, advance.ID, "monnify", ref)
+	}))
+
+	var reloaded models.EWAAdvance
+	require.NoError(t, models.DB.First(&reloaded, "id = ?", advance.ID).Error)
+	assert.Equal(t, models.AdvanceApproved, reloaded.Status,
+		"acceptance by a provider must not itself confirm disbursement")
+	require.NotNil(t, reloaded.ProviderName)
+	require.NotNil(t, reloaded.ProviderReference)
+	assert.Equal(t, "monnify", *reloaded.ProviderName)
+	assert.Equal(t, ref, *reloaded.ProviderReference)
+}
+
+// A second submission attempt for an advance that already has a provider
+// reference must be refused — this is the guard that makes it safe for the
+// disbursement worker to be invoked twice for the same advance (retry, or a
+// race between two workers) without risking a double transfer.
+func TestMarkSubmittedToProvider_RefusesDoubleSubmission(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, money.FromNaira(5_000), "submit-2", "127.0.0.1")
+	require.NoError(t, err)
+
+	ref := "MNFY-REF-" + uuid.New().String()[:8]
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return models.MarkSubmittedToProvider(tx, advance.ID, "monnify", ref)
+	}))
+
+	err = models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return models.MarkSubmittedToProvider(tx, advance.ID, "monnify", ref+"-RETRY")
+	})
+	require.ErrorIs(t, err, models.ErrAdvanceAlreadySubmitted)
+
+	// The original reference must be untouched by the refused second attempt.
+	var reloaded models.EWAAdvance
+	require.NoError(t, models.DB.First(&reloaded, "id = ?", advance.ID).Error)
+	require.NotNil(t, reloaded.ProviderReference)
+	assert.Equal(t, ref, *reloaded.ProviderReference)
+}
+
+func TestConfirmDisbursed_TransitionsApprovedToDisbursed(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, money.FromNaira(5_000), "confirm-1", "127.0.0.1")
+	require.NoError(t, err)
+
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return models.ConfirmDisbursed(tx, advance)
+	}))
+
+	var reloaded models.EWAAdvance
+	require.NoError(t, models.DB.First(&reloaded, "id = ?", advance.ID).Error)
+	assert.Equal(t, models.AdvanceDisbursed, reloaded.Status)
+	require.NotNil(t, reloaded.DisbursedAt)
+}
+
+// A provider that accepts a transfer and then reports failure must have its
+// receivable reversed exactly as if it had never been disbursed at all — cash
+// never left, so the worker owes nothing and the org's committed cash comes
+// back onto the books.
+func TestCancelAdvance_ReversesReceivableAfterProviderRejection(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	drawn := money.FromNaira(5_000)
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, drawn, "cancel-1", "127.0.0.1")
+	require.NoError(t, err)
+
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		recv, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable, money.NGN)
+		require.NoError(t, err)
+		bal, err := models.AccountBalance(tx, recv.ID)
+		require.NoError(t, err)
+		assert.Equal(t, ngnMoney(5_000), bal, "sanity check: the advance is on the books before cancellation")
+		return nil
+	}))
+
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return models.CancelAdvance(tx, advance, models.AdvanceApproved, "provider_rejected: bad account")
+	}))
+
+	var reloaded models.EWAAdvance
+	require.NoError(t, models.DB.First(&reloaded, "id = ?", advance.ID).Error)
+	assert.Equal(t, models.AdvanceCancelled, reloaded.Status)
+	assert.Equal(t, "provider_rejected: bad account", reloaded.DeclineReason)
+
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		recv, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable, money.NGN)
+		require.NoError(t, err)
+		bal, err := models.AccountBalance(tx, recv.ID)
+		require.NoError(t, err)
+		assert.Equal(t, ngnMoney(0), bal, "the receivable must be fully reversed after cancellation")
+		return nil
+	}))
+}
+
+// A stale-status cancellation attempt (e.g. the advance was already settled by
+// a concurrent payroll run) must be reported as ErrStaleStatus, not silently
+// succeed or silently fail — callers depend on being able to tell the
+// difference between "someone else handled it" and "nothing happened".
+func TestCancelAdvance_StaleStatusIsReported(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, money.FromNaira(5_000), "cancel-2", "127.0.0.1")
+	require.NoError(t, err)
+	markDisbursed(t, orgID, advance.ID) // moves it to Disbursed, out of Approved
+
+	err = models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return models.CancelAdvance(tx, advance, models.AdvanceApproved, "provider_rejected: too late")
+	})
+	require.ErrorIs(t, err, models.ErrStaleStatus)
 }

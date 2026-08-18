@@ -2,15 +2,19 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	"go-payroll-engine/internal/models"
 	"go-payroll-engine/internal/observability"
+	"go-payroll-engine/internal/workers"
 	"go-payroll-engine/pkg/money"
 
+	"github.com/hibiken/asynq"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // PeriodLayout is the payroll period format: "2026-08".
@@ -107,6 +111,18 @@ type Eligibility struct {
 	Available     money.Kobo `json:"available"`
 	MinimumDraw   money.Kobo `json:"minimum_draw"`
 
+	// ProjectedPayday is what will actually land on payday if nothing further is
+	// drawn, and ProjectedPaydayIfMaxDrawn if the whole remaining allowance is
+	// taken. UK user research is unambiguous that people grasp "money available
+	// now" far more readily than "next payday reduced" — they experience the
+	// smaller paycheck as a surprise. Both numbers are returned so the interface
+	// can show the consequence next to the offer rather than a screen later.
+	ProjectedPayday           money.Kobo `json:"projected_payday"`
+	ProjectedPaydayIfMaxDrawn money.Kobo `json:"projected_payday_if_max_drawn"`
+
+	// ProtectedPayday is the worker's own floor, if they set one.
+	ProtectedPayday money.Kobo `json:"protected_payday"`
+
 	DrawsThisPeriod int        `json:"draws_this_period"`
 	MaxDraws        int        `json:"max_draws_per_period"`
 	NextEligibleAt  *time.Time `json:"next_eligible_at,omitempty"`
@@ -193,8 +209,16 @@ func (s *EWAService) eligibilityTx(tx *gorm.DB, orgID, employeeID string, asOf t
 
 	el.TierCap = TierCap(el.Dependency.Tier, policyCap, *policy)
 
-	// Outstanding advances for this period reduce what is left.
-	outstanding, drawsThisPeriod, lastDrawAt, err := s.outstandingTx(tx, orgID, employeeID, period)
+	// Outstanding advances for this period reduce what is left. "Outstanding"
+	// (approved + disbursed) shrinks the cap, because an approved-but-undisbursed
+	// advance is still a committed draw against this period's allowance.
+	// "Recoverable" (disbursed only) is the narrower figure that actually funds
+	// the payday projection below: SettleAdvancesForPayrollItem cancels an
+	// approved advance that never disbursed and withholds nothing for it, so
+	// counting it as a payday deduction would show the worker a smaller number
+	// than payroll will actually pay.
+	outstanding, recoverable, drawsThisPeriod, lastDrawAt, err :=
+		s.outstandingTx(tx, orgID, employeeID, period)
 	if err != nil {
 		return nil, err
 	}
@@ -205,7 +229,38 @@ func (s *EWAService) eligibilityTx(tx *gorm.DB, orgID, employeeID string, asOf t
 	if err != nil || available.IsNegative() {
 		available = money.Zero
 	}
+
+	// The worker's own floor caps everything else. Applied last and
+	// unconditionally: a self-imposed limit must not be overridden by a policy
+	// or tier that happens to be more generous, or it is not a limit at all.
+	pref, err := s.workerPreferenceTx(tx, orgID, employeeID)
+	if err != nil {
+		return nil, err
+	}
+	el.ProtectedPayday = pref.ProtectedPayday()
+	if el.ProtectedPayday.IsPositive() {
+		spendable, subErr := emp.Salary.Sub(el.ProtectedPayday)
+		if subErr != nil || spendable.IsNegative() {
+			spendable = money.Zero
+		}
+		headroom, subErr := spendable.Sub(outstanding)
+		if subErr != nil || headroom.IsNegative() {
+			headroom = money.Zero
+		}
+		if headroom < available {
+			available = headroom
+		}
+	}
 	el.Available = available
+
+	// What actually lands on payday, now and in the worst case. Based on
+	// `recoverable`, not `outstanding` — see the comment above outstandingTx.
+	if projected, subErr := emp.Salary.Sub(recoverable); subErr == nil && !projected.IsNegative() {
+		el.ProjectedPayday = projected
+		if worst, wErr := projected.Sub(available); wErr == nil && !worst.IsNegative() {
+			el.ProjectedPaydayIfMaxDrawn = worst
+		}
+	}
 
 	// Velocity guardrails.
 	if drawsThisPeriod >= policy.MaxDrawsPerPeriod {
@@ -330,6 +385,27 @@ func (s *EWAService) RequestAdvance(
 	if advance != nil && advance.Status == models.AdvanceDeclined {
 		return advance, eligibility, fmt.Errorf("%w: %s", ErrAdvanceDeclined, advance.DeclineReason)
 	}
+
+	// Enqueue after commit, gated on STATE rather than on "was this call the one
+	// that created the approval". Gating on freshness alone would strand an
+	// advance forever if the enqueue below ever failed: a client retrying the
+	// exact same request hits the idempotency-key replay branch above and
+	// returns early, never reaching this point again. Checking
+	// ProviderReference instead means a retried request keeps re-attempting the
+	// enqueue for as long as it's still unsubmitted — the retry IS the recovery
+	// path, with no separate reconciliation mechanism required for this case.
+	// The worker itself tolerates a duplicate enqueue: MarkSubmittedToProvider
+	// is guarded on provider_reference being NULL, so two workers racing on the
+	// same advance can both call the provider (relying on the provider's own
+	// idempotency keying by our reference) but only one submission gets recorded.
+	if advance != nil && advance.Status == models.AdvanceApproved && advance.ProviderReference == nil {
+		payload, _ := json.Marshal(map[string]string{"advance_id": advance.ID, "org_id": orgID})
+		task := asynq.NewTask(workers.TypeDisburseEWAAdvance, payload)
+		if _, enqueueErr := workers.Client.Enqueue(task); enqueueErr != nil {
+			observability.EWADisbursementEnqueueFailuresTotal.WithLabelValues(orgID).Inc()
+		}
+	}
+
 	return advance, eligibility, nil
 }
 
@@ -405,35 +481,18 @@ func (s *EWAService) SettleAdvancesForPayrollItem(
 		return 0, err
 	}
 
-	cash, err := models.EnsureAccount(tx, orgID, "", models.AccountCashSettlement, money.NGN)
-	if err != nil {
-		return 0, err
-	}
-
 	var withheld money.Kobo
 	for i := range advances {
 		adv := &advances[i]
 
 		if adv.Status == models.AdvanceApproved {
-			// Committed but never sent. Cancel it and reverse the receivable; the
-			// worker gets their full pay.
-			if err := models.TransitionAdvance(tx, adv, models.AdvanceApproved, models.AdvanceCancelled); err != nil {
+			// Committed but never disbursed by settlement time. Cancel it and
+			// reverse the receivable; the worker gets their full pay. Shared with
+			// the disbursement webhook's failure path — see CancelAdvance.
+			if err := models.CancelAdvance(tx, adv, models.AdvanceApproved, "settled_before_disbursement"); err != nil {
 				if errors.Is(err, models.ErrStaleStatus) {
 					continue
 				}
-				return 0, err
-			}
-			if _, err := models.PostTransaction(tx, models.PostingRequest{
-				OrgID:          orgID,
-				Kind:           "ewa_cancellation",
-				Reference:      adv.ID,
-				IdempotencyKey: "ewa_cancellation:" + adv.ID,
-				Entries: []models.EntryInput{
-					{AccountID: cash.ID, Direction: models.Debit, Amount: money.NGNFromKobo(adv.AmountKobo)},
-					{AccountID: receivable.ID, Direction: models.Credit, Amount: money.NGNFromKobo(adv.AmountKobo)},
-				},
-			}); err != nil {
-				observability.LedgerImbalanceTotal.WithLabelValues(orgID).Inc()
 				return 0, err
 			}
 			continue
@@ -473,6 +532,84 @@ func (s *EWAService) SettleAdvancesForPayrollItem(
 	return withheld, nil
 }
 
+// workerPreferenceTx loads the worker's self-imposed floor, defaulting to none.
+func (s *EWAService) workerPreferenceTx(
+	tx *gorm.DB, orgID, employeeID string,
+) (*models.EWAWorkerPreference, error) {
+	var pref models.EWAWorkerPreference
+	err := tx.First(&pref, "organization_id = ? AND employee_id = ?", orgID, employeeID).Error
+	if err == nil {
+		return &pref, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	return &models.EWAWorkerPreference{OrganizationID: orgID, EmployeeID: employeeID}, nil
+}
+
+// ErrFloorLoweringRateLimited is returned when a worker tries to lower their
+// protected-payday floor before the cooling-off period has elapsed.
+var ErrFloorLoweringRateLimited = errors.New("floor lowering is rate-limited")
+
+// SetProtectedPayday sets or updates the worker's self-imposed floor.
+//
+// Raising it (or setting it for the first time) takes effect immediately —
+// protecting more of payday is always allowed. Lowering it is rate-limited by
+// the org's cooling-off policy, the same one that governs draws: without that,
+// a worker could drop their own floor in the exact moment they are tempted to
+// draw past it, and the floor would be decorative rather than binding. It is
+// applied by their own choice, but held to it by the system, which is the
+// entire point of a commitment device.
+func (s *EWAService) SetProtectedPayday(
+	ctx context.Context, orgID, employeeID string, amount money.Kobo, now time.Time,
+) (*models.EWAWorkerPreference, error) {
+	var result *models.EWAWorkerPreference
+	err := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
+		current, err := s.workerPreferenceTx(tx, orgID, employeeID)
+		if err != nil {
+			return err
+		}
+		policy, err := s.policyTx(tx, orgID)
+		if err != nil {
+			return err
+		}
+
+		// Gated against LastChangedAt, not "last time it was lowered": with the
+		// latter, the very first lowering after a raise would have nothing to
+		// rate-limit against and would slip through unprotected.
+		lowering := amount < current.ProtectedPayday()
+		if lowering && current.LastChangedAt != nil {
+			wait := time.Duration(policy.CoolingOffHours) * time.Hour
+			if ready := current.LastChangedAt.Add(wait); now.Before(ready) {
+				return fmt.Errorf("%w: try again after %s", ErrFloorLoweringRateLimited, ready.Format(time.RFC3339))
+			}
+		}
+
+		updated := models.EWAWorkerPreference{
+			OrganizationID:       orgID,
+			EmployeeID:           employeeID,
+			ProtectedPaydayMinor: int64(amount),
+			LastChangedAt:        &now,
+		}
+
+		// An explicit upsert, not tx.Save. The primary key is composite
+		// (org_id, employee_id); GORM's Save() issues an UPDATE keyed on a
+		// non-zero primary key and does NOT fall back to INSERT when no row
+		// matches, so on a worker's first-ever call it would silently affect
+		// zero rows — the preference would never be persisted, and every
+		// GetEligibility call afterward would keep reading the zero default.
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "organization_id"}, {Name: "employee_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{"protected_payday_minor", "last_changed_at", "updated_at"}),
+		}).Create(&updated).Error; err != nil {
+			return err
+		}
+		result = &updated
+		return nil
+	})
+	return result, err
+}
+
 // policyTx loads the org's policy, falling back to the conservative default.
 func (s *EWAService) policyTx(tx *gorm.DB, orgID string) (*models.EWAPolicy, error) {
 	var policy models.EWAPolicy
@@ -509,9 +646,21 @@ func (s *EWAService) drawHistoryTx(tx *gorm.DB, orgID, employeeID string, asOf t
 
 // outstandingTx sums unsettled advances for the period and reports draw count
 // and the most recent draw time, which drive the velocity guardrails.
+//
+// Two totals are returned because they answer different questions:
+//
+//   - outstanding (approved + disbursed) is what still counts against this
+//     period's allowance. An approved-but-undisbursed advance is a committed
+//     draw the worker cannot request again, so it must shrink the cap.
+//   - recoverable (disbursed only) is what payroll will actually deduct.
+//     SettleAdvancesForPayrollItem cancels an approved advance that never
+//     disbursed rather than withholding it — see that function's comment — so
+//     an approved-but-undisbursed advance must NOT reduce the payday
+//     projection or it tells the worker a smaller number than they will
+//     actually be paid.
 func (s *EWAService) outstandingTx(
 	tx *gorm.DB, orgID, employeeID, period string,
-) (money.Kobo, int, time.Time, error) {
+) (outstanding, recoverable money.Kobo, drawCount int, lastDrawAt time.Time, err error) {
 	var rows []models.EWAAdvance
 	if err := tx.Where(
 		"organization_id = ? AND employee_id = ? AND period = ? AND status IN ?",
@@ -520,24 +669,30 @@ func (s *EWAService) outstandingTx(
 			models.AdvanceApproved, models.AdvanceDisbursed, models.AdvanceSettled,
 		},
 	).Find(&rows).Error; err != nil {
-		return 0, 0, time.Time{}, err
+		return 0, 0, 0, time.Time{}, err
 	}
 
-	var outstanding money.Kobo
-	var last time.Time
 	for _, r := range rows {
 		if r.IsOutstanding() {
-			next, err := outstanding.Add(r.AmountKobo)
-			if err != nil {
-				return 0, 0, time.Time{}, fmt.Errorf("outstanding total overflow: %w", err)
+			next, addErr := outstanding.Add(r.AmountKobo)
+			if addErr != nil {
+				return 0, 0, 0, time.Time{}, fmt.Errorf("outstanding total overflow: %w", addErr)
 			}
 			outstanding = next
+
+			if r.Status == models.AdvanceDisbursed {
+				next, addErr := recoverable.Add(r.AmountKobo)
+				if addErr != nil {
+					return 0, 0, 0, time.Time{}, fmt.Errorf("recoverable total overflow: %w", addErr)
+				}
+				recoverable = next
+			}
 		}
-		if r.RequestedAt.After(last) {
-			last = r.RequestedAt
+		if r.RequestedAt.After(lastDrawAt) {
+			lastDrawAt = r.RequestedAt
 		}
 	}
-	return outstanding, len(rows), last, nil
+	return outstanding, recoverable, len(rows), lastDrawAt, nil
 }
 
 // userIDForEmployee resolves the worker's app identity. The advance references

@@ -37,7 +37,7 @@ func main() {
 
 	models.InitEncryption() // must run before InitDB so the GORM serializer is ready
 	models.InitDB()
-	middleware.InitJWT()    // loads JWT secret after env is confirmed present
+	middleware.InitJWT() // loads JWT secret after env is confirmed present
 	workers.InitAsynqClient()
 	workers.InitRedisClient()
 	defer workers.CloseAsynqClient()
@@ -106,9 +106,12 @@ func startWorker(redisAddr string) {
 		},
 	)
 
+	registry := workers.DefaultProviderRegistry()
+
 	mux := asynq.NewServeMux()
 	mux.HandleFunc(workers.TypeProcessPayroll, workers.NewPayrollHandler().ProcessPayrollTask)
 	mux.HandleFunc(workers.TypeVerifyBVN, workers.NewBVNHandler().ProcessBVNTask)
+	mux.HandleFunc(workers.TypeDisburseEWAAdvance, workers.NewEWADisbursementHandler(registry).ProcessEWADisbursementTask)
 
 	log.Println("Worker server starting...")
 

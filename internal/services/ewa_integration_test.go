@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go-payroll-engine/internal/models"
+	"go-payroll-engine/internal/workers"
 	"go-payroll-engine/pkg/money"
 
 	"github.com/google/uuid"
@@ -29,6 +30,15 @@ func TestMain(m *testing.M) {
 	}
 	models.DB = db
 	models.InitEncryption()
+
+	// RequestAdvance enqueues a disbursement task after commit, so this suite
+	// needs a real Asynq client wired to a reachable Redis — without it,
+	// workers.Client stays nil and the enqueue call panics the first time any
+	// test here calls RequestAdvance. REDIS_URL matches the CI redis service
+	// and any local Redis started for this suite.
+	workers.InitAsynqClient()
+	defer workers.CloseAsynqClient()
+
 	os.Exit(m.Run())
 }
 
@@ -703,4 +713,142 @@ func TestSetProtectedPayday_ConsecutiveLoweringsAreEachRateLimited(t *testing.T)
 	_, err = svc.SetProtectedPayday(context.Background(), orgID, employeeID, money.FromNaira(10_000), t1.Add(time.Minute))
 	require.ErrorIs(t, err, ErrFloorLoweringRateLimited,
 		"each lowering must reset the cooling-off clock")
+}
+
+// --- Disbursement primitives: models.MarkSubmittedToProvider / ConfirmDisbursed / CancelAdvance ---
+
+func TestMarkSubmittedToProvider_RecordsReferenceWithoutTransitioning(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, money.FromNaira(5_000), "submit-1", "127.0.0.1")
+	require.NoError(t, err)
+	require.Equal(t, models.AdvanceApproved, advance.Status)
+
+	ref := "MNFY-REF-" + uuid.New().String()[:8]
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return models.MarkSubmittedToProvider(tx, advance.ID, "monnify", ref)
+	}))
+
+	var reloaded models.EWAAdvance
+	require.NoError(t, models.DB.First(&reloaded, "id = ?", advance.ID).Error)
+	assert.Equal(t, models.AdvanceApproved, reloaded.Status,
+		"acceptance by a provider must not itself confirm disbursement")
+	require.NotNil(t, reloaded.ProviderName)
+	require.NotNil(t, reloaded.ProviderReference)
+	assert.Equal(t, "monnify", *reloaded.ProviderName)
+	assert.Equal(t, ref, *reloaded.ProviderReference)
+}
+
+// A second submission attempt for an advance that already has a provider
+// reference must be refused — this is the guard that makes it safe for the
+// disbursement worker to be invoked twice for the same advance (retry, or a
+// race between two workers) without risking a double transfer.
+func TestMarkSubmittedToProvider_RefusesDoubleSubmission(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, money.FromNaira(5_000), "submit-2", "127.0.0.1")
+	require.NoError(t, err)
+
+	ref := "MNFY-REF-" + uuid.New().String()[:8]
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return models.MarkSubmittedToProvider(tx, advance.ID, "monnify", ref)
+	}))
+
+	err = models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return models.MarkSubmittedToProvider(tx, advance.ID, "monnify", ref+"-RETRY")
+	})
+	require.ErrorIs(t, err, models.ErrAdvanceAlreadySubmitted)
+
+	// The original reference must be untouched by the refused second attempt.
+	var reloaded models.EWAAdvance
+	require.NoError(t, models.DB.First(&reloaded, "id = ?", advance.ID).Error)
+	require.NotNil(t, reloaded.ProviderReference)
+	assert.Equal(t, ref, *reloaded.ProviderReference)
+}
+
+func TestConfirmDisbursed_TransitionsApprovedToDisbursed(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, money.FromNaira(5_000), "confirm-1", "127.0.0.1")
+	require.NoError(t, err)
+
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return models.ConfirmDisbursed(tx, advance)
+	}))
+
+	var reloaded models.EWAAdvance
+	require.NoError(t, models.DB.First(&reloaded, "id = ?", advance.ID).Error)
+	assert.Equal(t, models.AdvanceDisbursed, reloaded.Status)
+	require.NotNil(t, reloaded.DisbursedAt)
+}
+
+// A provider that accepts a transfer and then reports failure must have its
+// receivable reversed exactly as if it had never been disbursed at all — cash
+// never left, so the worker owes nothing and the org's committed cash comes
+// back onto the books.
+func TestCancelAdvance_ReversesReceivableAfterProviderRejection(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	drawn := money.FromNaira(5_000)
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, drawn, "cancel-1", "127.0.0.1")
+	require.NoError(t, err)
+
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		recv, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable, money.NGN)
+		require.NoError(t, err)
+		bal, err := models.AccountBalance(tx, recv.ID)
+		require.NoError(t, err)
+		assert.Equal(t, ngnMoney(5_000), bal, "sanity check: the advance is on the books before cancellation")
+		return nil
+	}))
+
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return models.CancelAdvance(tx, advance, models.AdvanceApproved, "provider_rejected: bad account")
+	}))
+
+	var reloaded models.EWAAdvance
+	require.NoError(t, models.DB.First(&reloaded, "id = ?", advance.ID).Error)
+	assert.Equal(t, models.AdvanceCancelled, reloaded.Status)
+	assert.Equal(t, "provider_rejected: bad account", reloaded.DeclineReason)
+
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		recv, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable, money.NGN)
+		require.NoError(t, err)
+		bal, err := models.AccountBalance(tx, recv.ID)
+		require.NoError(t, err)
+		assert.Equal(t, ngnMoney(0), bal, "the receivable must be fully reversed after cancellation")
+		return nil
+	}))
+}
+
+// A stale-status cancellation attempt (e.g. the advance was already settled by
+// a concurrent payroll run) must be reported as ErrStaleStatus, not silently
+// succeed or silently fail — callers depend on being able to tell the
+// difference between "someone else handled it" and "nothing happened".
+func TestCancelAdvance_StaleStatusIsReported(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, money.FromNaira(5_000), "cancel-2", "127.0.0.1")
+	require.NoError(t, err)
+	markDisbursed(t, orgID, advance.ID) // moves it to Disbursed, out of Approved
+
+	err = models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return models.CancelAdvance(tx, advance, models.AdvanceApproved, "provider_rejected: too late")
+	})
+	require.ErrorIs(t, err, models.ErrStaleStatus)
 }

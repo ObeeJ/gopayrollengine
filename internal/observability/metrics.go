@@ -48,6 +48,21 @@ var (
 		Buckets: []float64{0.1, 0.5, 1, 2, 5, 10, 30},
 	}, []string{"operation"})
 
+	// Provider-generic — every payment rail behind the provider.Provider
+	// interface reports here, labelled by provider name, so a dashboard can
+	// compare Monnify against Paystack against whatever comes next without a
+	// new metric per integration.
+	ProviderCallsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payroll_provider_api_calls_total",
+		Help: "Total payment provider API calls by provider, operation, and outcome.",
+	}, []string{"provider", "operation", "success"})
+
+	ProviderCallDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "payroll_provider_api_call_duration_seconds",
+		Help:    "Payment provider API call latency by provider and operation.",
+		Buckets: []float64{0.1, 0.5, 1, 2, 5, 10, 30},
+	}, []string{"provider", "operation"})
+
 	// Webhook pipeline — answers "are Monnify callbacks arriving and being processed?"
 	WebhookEventsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "payroll_webhook_events_total",
@@ -114,4 +129,23 @@ var (
 		Help:    "Fraction of earned wages drawn before payday, per approved advance.",
 		Buckets: []float64{0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.75, 0.9, 1.0},
 	}, []string{"org_id"})
+
+	// EWA disbursement — answers "is the money actually moving?" An advance
+	// approved without ever being disbursed is worse than one declined: the
+	// worker was told yes and it never arrived.
+	EWADisbursementEnqueueFailuresTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payroll_ewa_disbursement_enqueue_failures_total",
+		Help: "Approved advances whose disbursement task failed to enqueue — self-heals via idempotency-key retry, but a sustained rate means the queue is down.",
+	}, []string{"org_id"})
+
+	EWADisbursementOutcomesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payroll_ewa_disbursement_outcomes_total",
+		Help: "EWA disbursement worker outcomes by provider and result.",
+	}, []string{"provider", "result"}) // result: "submitted" | "rejected" | "provider_unavailable"
+
+	EWADisbursementDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "payroll_ewa_disbursement_duration_seconds",
+		Help:    "End-to-end EWA disbursement submission time, from task pickup to provider acceptance.",
+		Buckets: []float64{0.5, 1, 2, 5, 10, 30},
+	}, []string{"provider"})
 )

@@ -143,6 +143,14 @@ type EWAAdvance struct {
 	IdempotencyKey       *string `json:"-"`
 	SettledPayrollItemID *string `json:"settled_payroll_item_id,omitempty"`
 
+	// ProviderName / ProviderReference record which payment rail handled this
+	// advance and that rail's own identifier for the transfer. Set once
+	// InitiateTransfer is accepted; used to correlate a webhook or status poll
+	// back to this row, and to route reconciliation through the same
+	// provider that submitted it (see provider.Registry.ByName).
+	ProviderName      *string `json:"provider_name,omitempty"`
+	ProviderReference *string `json:"provider_reference,omitempty"`
+
 	RequestedAt time.Time      `json:"requested_at"`
 	DisbursedAt *time.Time     `json:"disbursed_at,omitempty"`
 	SettledAt   *time.Time     `json:"settled_at,omitempty"`
@@ -195,7 +203,7 @@ type EWAWorkerPreference struct {
 	OrganizationID string `gorm:"primaryKey" json:"organization_id"`
 	EmployeeID     string `gorm:"primaryKey" json:"employee_id"`
 
-	ProtectedPaydayMinor int64      `gorm:"column:protected_payday_minor" json:"protected_payday_minor"`
+	ProtectedPaydayMinor int64 `gorm:"column:protected_payday_minor" json:"protected_payday_minor"`
 	// LastChangedAt is set on every write, raise or lower alike. A lowering
 	// attempt is rate-limited against it — not against "last time it was
 	// lowered" — so the first lowering after a raise is still protected.

@@ -2,14 +2,17 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	"go-payroll-engine/internal/models"
 	"go-payroll-engine/internal/observability"
+	"go-payroll-engine/internal/workers"
 	"go-payroll-engine/pkg/money"
 
+	"github.com/hibiken/asynq"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -382,6 +385,27 @@ func (s *EWAService) RequestAdvance(
 	if advance != nil && advance.Status == models.AdvanceDeclined {
 		return advance, eligibility, fmt.Errorf("%w: %s", ErrAdvanceDeclined, advance.DeclineReason)
 	}
+
+	// Enqueue after commit, gated on STATE rather than on "was this call the one
+	// that created the approval". Gating on freshness alone would strand an
+	// advance forever if the enqueue below ever failed: a client retrying the
+	// exact same request hits the idempotency-key replay branch above and
+	// returns early, never reaching this point again. Checking
+	// ProviderReference instead means a retried request keeps re-attempting the
+	// enqueue for as long as it's still unsubmitted — the retry IS the recovery
+	// path, with no separate reconciliation mechanism required for this case.
+	// The worker itself tolerates a duplicate enqueue: MarkSubmittedToProvider
+	// is guarded on provider_reference being NULL, so two workers racing on the
+	// same advance can both call the provider (relying on the provider's own
+	// idempotency keying by our reference) but only one submission gets recorded.
+	if advance != nil && advance.Status == models.AdvanceApproved && advance.ProviderReference == nil {
+		payload, _ := json.Marshal(map[string]string{"advance_id": advance.ID, "org_id": orgID})
+		task := asynq.NewTask(workers.TypeDisburseEWAAdvance, payload)
+		if _, enqueueErr := workers.Client.Enqueue(task); enqueueErr != nil {
+			observability.EWADisbursementEnqueueFailuresTotal.WithLabelValues(orgID).Inc()
+		}
+	}
+
 	return advance, eligibility, nil
 }
 
@@ -457,35 +481,18 @@ func (s *EWAService) SettleAdvancesForPayrollItem(
 		return 0, err
 	}
 
-	cash, err := models.EnsureAccount(tx, orgID, "", models.AccountCashSettlement, money.NGN)
-	if err != nil {
-		return 0, err
-	}
-
 	var withheld money.Kobo
 	for i := range advances {
 		adv := &advances[i]
 
 		if adv.Status == models.AdvanceApproved {
-			// Committed but never sent. Cancel it and reverse the receivable; the
-			// worker gets their full pay.
-			if err := models.TransitionAdvance(tx, adv, models.AdvanceApproved, models.AdvanceCancelled); err != nil {
+			// Committed but never disbursed by settlement time. Cancel it and
+			// reverse the receivable; the worker gets their full pay. Shared with
+			// the disbursement webhook's failure path — see CancelAdvance.
+			if err := models.CancelAdvance(tx, adv, models.AdvanceApproved, "settled_before_disbursement"); err != nil {
 				if errors.Is(err, models.ErrStaleStatus) {
 					continue
 				}
-				return 0, err
-			}
-			if _, err := models.PostTransaction(tx, models.PostingRequest{
-				OrgID:          orgID,
-				Kind:           "ewa_cancellation",
-				Reference:      adv.ID,
-				IdempotencyKey: "ewa_cancellation:" + adv.ID,
-				Entries: []models.EntryInput{
-					{AccountID: cash.ID, Direction: models.Debit, Amount: money.NGNFromKobo(adv.AmountKobo)},
-					{AccountID: receivable.ID, Direction: models.Credit, Amount: money.NGNFromKobo(adv.AmountKobo)},
-				},
-			}); err != nil {
-				observability.LedgerImbalanceTotal.WithLabelValues(orgID).Inc()
 				return 0, err
 			}
 			continue

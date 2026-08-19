@@ -42,14 +42,14 @@ type EWAService struct{}
 // NewEWAService constructs the service.
 func NewEWAService() *EWAService { return &EWAService{} }
 
-// AccruedToDate returns wages earned so far in the period.
+// AccruedToDate returns wages earned so far in the period, for salaried staff.
 //
 // Accrual is straight-line across *working* days (Mon–Fri), not calendar days:
 // a worker three days into a month has not earned 10% of a monthly salary, and
 // paying as if they had is how an EWA product ends up advancing unearned wages.
-// Salaried staff on a monthly cycle is the assumption; hourly and shift-based
-// accrual needs real timesheet data and is deliberately out of scope here rather
-// than approximated.
+// This assumes a fixed monthly salary; hourly and gig workers use
+// accruedHourlyToDateTx instead, which sums real approved timesheet entries
+// rather than approximating a schedule — see migration 000018.
 func AccruedToDate(salary money.Kobo, period string, asOf time.Time) (money.Kobo, error) {
 	start, err := time.ParseInLocation(PeriodLayout, period, asOf.Location())
 	if err != nil {
@@ -95,6 +95,49 @@ func workingDaysBetween(from, to time.Time) int {
 
 func truncateToDay(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+}
+
+// accruedHourlyToDateTx sums an hourly/gig employee's approved timesheet
+// minutes for `period` up to asOf and converts them to wages at their hourly
+// rate. Unapproved entries never count — see migration 000018's comment on
+// why an unverified timesheet claim must not fund an advance.
+func (s *EWAService) accruedHourlyToDateTx(tx *gorm.DB, orgID, employeeID string, hourlyRate money.Kobo, period string, asOf time.Time) (money.Kobo, error) {
+	minutes, err := models.SumApprovedMinutes(tx, orgID, employeeID, period, asOf)
+	if err != nil {
+		return 0, err
+	}
+	return hourlyRate.Percent(minutes, 60)
+}
+
+// hourlyMonthlyEarningsBasisTx estimates a stable "typical month" figure for
+// an hourly/gig worker from their actual approved earnings over the trailing
+// 90 days, rather than assuming a standard full-time schedule. Used only as
+// the dependency-scoring denominator and the number shown as "monthly
+// salary" — never as a prediction of this period's final pay, which is
+// accrued-to-date's job (see the periodEarningsBasis comment in eligibilityTx).
+func (s *EWAService) hourlyMonthlyEarningsBasisTx(tx *gorm.DB, orgID, employeeID string, hourlyRate money.Kobo, asOf time.Time) (money.Kobo, error) {
+	// work_date is a DATE column; bounds are rounded to whole days so the
+	// comparison is exact regardless of how the driver types the parameter —
+	// see the comment on models.SumApprovedMinutes for why a sub-day instant
+	// bound against a DATE column is ambiguous.
+	asOfDate := truncateToDay(asOf)
+	windowStart := asOfDate.AddDate(0, 0, -90)
+	upperExclusive := asOfDate.AddDate(0, 0, 1)
+	var totalMinutes int64
+	err := tx.Model(&models.TimeEntry{}).
+		Where("organization_id = ? AND employee_id = ? AND status = ?", orgID, employeeID, models.TimeEntryApproved).
+		Where("work_date >= ? AND work_date < ?", windowStart, upperExclusive).
+		Select("COALESCE(SUM(minutes_worked), 0)").
+		Scan(&totalMinutes).Error
+	if err != nil {
+		return 0, err
+	}
+	earned, err := hourlyRate.Percent(totalMinutes, 60)
+	if err != nil {
+		return 0, err
+	}
+	// 90 days ≈ 3 months.
+	return earned.Percent(1, 3)
 }
 
 // Eligibility — the full picture behind an allow/deny decision. Returned to the
@@ -159,11 +202,10 @@ func (s *EWAService) eligibilityTx(tx *gorm.DB, orgID, employeeID string, asOf t
 
 	period := asOf.Format(PeriodLayout)
 	el := &Eligibility{
-		EmployeeID:    emp.ID,
-		Period:        period,
-		MonthlySalary: emp.Salary,
-		MinimumDraw:   policy.MinDrawKobo,
-		MaxDraws:      policy.MaxDrawsPerPeriod,
+		EmployeeID:  emp.ID,
+		Period:      period,
+		MinimumDraw: policy.MinDrawKobo,
+		MaxDraws:    policy.MaxDrawsPerPeriod,
 	}
 
 	if !policy.Enabled {
@@ -174,16 +216,57 @@ func (s *EWAService) eligibilityTx(tx *gorm.DB, orgID, employeeID string, asOf t
 		el.Blocked, el.BlockedReason = true, DeclineInactiveAccount
 		return el, nil
 	}
-	if !emp.Salary.IsPositive() {
+	if emp.IsHourly() {
+		if !emp.HourlyRateKobo.IsPositive() {
+			el.Blocked, el.BlockedReason = true, DeclineNoSalaryOnFile
+			return el, nil
+		}
+	} else if !emp.Salary.IsPositive() {
 		el.Blocked, el.BlockedReason = true, DeclineNoSalaryOnFile
 		return el, nil
 	}
 
-	accrued, err := AccruedToDate(emp.Salary, period, asOf)
-	if err != nil {
-		return nil, err
+	// MonthlySalary is a stable "typical monthly income" reference — the
+	// dependency utilization denominator, and what the API shows. For salaried
+	// staff that's just the salary. Hourly/gig workers have no fixed figure, so
+	// it is the actual trailing average rather than an assumed full-time month:
+	// assuming one would overstate a part-time worker's income, and the
+	// roadmap is explicit that hourly accrual "must not be faked" — see
+	// migration 000018.
+	var accrued money.Kobo
+	if emp.IsHourly() {
+		basis, err := s.hourlyMonthlyEarningsBasisTx(tx, orgID, employeeID, emp.HourlyRateKobo, asOf)
+		if err != nil {
+			return nil, err
+		}
+		el.MonthlySalary = basis
+		accrued, err = s.accruedHourlyToDateTx(tx, orgID, employeeID, emp.HourlyRateKobo, period, asOf)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		el.MonthlySalary = emp.Salary
+		var err error
+		accrued, err = AccruedToDate(emp.Salary, period, asOf)
+		if err != nil {
+			return nil, err
+		}
 	}
 	el.AccruedToDate = accrued
+
+	// periodEarningsBasis is "what lands on payday if nothing else changes",
+	// used below for the protected-payday headroom and the projected-payday
+	// figures. For salaried staff that is the fixed salary, known up front.
+	// Hourly/gig workers have no such fixed figure until the period closes, so
+	// this uses accrued-to-date instead: a running total that only reflects
+	// hours actually approved, never a prediction of hours not yet worked. It
+	// necessarily understates final pay early in the period and converges to
+	// the true total as more entries are approved — the safe direction to be
+	// wrong in, since it never promises a worker more than has been verified.
+	periodEarningsBasis := emp.Salary
+	if emp.IsHourly() {
+		periodEarningsBasis = accrued
+	}
 
 	// Policy cap: a share of what is actually earned, then a hard ceiling.
 	policyCap, err := accrued.Percent(int64(policy.MaxAccrualPct), 100)
@@ -203,7 +286,7 @@ func (s *EWAService) eligibilityTx(tx *gorm.DB, orgID, employeeID string, asOf t
 	el.Dependency = ScoreDependency(DependencyInput{
 		Now:           asOf,
 		Draws:         history,
-		MonthlySalary: emp.Salary,
+		MonthlySalary: el.MonthlySalary,
 		LastPayday:    lastPayday(asOf),
 	})
 
@@ -239,7 +322,7 @@ func (s *EWAService) eligibilityTx(tx *gorm.DB, orgID, employeeID string, asOf t
 	}
 	el.ProtectedPayday = pref.ProtectedPayday()
 	if el.ProtectedPayday.IsPositive() {
-		spendable, subErr := emp.Salary.Sub(el.ProtectedPayday)
+		spendable, subErr := periodEarningsBasis.Sub(el.ProtectedPayday)
 		if subErr != nil || spendable.IsNegative() {
 			spendable = money.Zero
 		}
@@ -255,7 +338,7 @@ func (s *EWAService) eligibilityTx(tx *gorm.DB, orgID, employeeID string, asOf t
 
 	// What actually lands on payday, now and in the worst case. Based on
 	// `recoverable`, not `outstanding` — see the comment above outstandingTx.
-	if projected, subErr := emp.Salary.Sub(recoverable); subErr == nil && !projected.IsNegative() {
+	if projected, subErr := periodEarningsBasis.Sub(recoverable); subErr == nil && !projected.IsNegative() {
 		el.ProjectedPayday = projected
 		if worst, wErr := projected.Sub(available); wErr == nil && !worst.IsNegative() {
 			el.ProjectedPaydayIfMaxDrawn = worst

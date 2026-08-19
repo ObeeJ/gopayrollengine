@@ -303,8 +303,12 @@ more of the same. That is where the actual differentiation is:
 
 ### Phase 5 — Scale
 
-- Hourly/shift accrual from real timesheet data (current engine assumes monthly
-  salaried; hourly is approximated nowhere and must not be faked)
+- ~~Hourly/shift accrual from real timesheet data~~ — done: `TimeEntry`
+  (migration 000018) accrues hourly/gig staff from approved timesheet entries,
+  never an assumed schedule. Still open: no shift-differential or overtime
+  pay rules, and payroll only pays whole approved entries closed out before
+  the run — a late approval after payroll has already run for that period
+  is not swept up retroactively.
 - Multi-currency, multi-country
 - Direct-to-consumer (much harder: no payroll deduction, so no recourse-free model)
 
@@ -358,7 +362,7 @@ and recorded).
 | Ledger drifts from gateway reality | Medium | Phase 3 automated reconciliation |
 | Zero-fee model proves unviable | Medium | Per-seat employer pricing; fee path exists but off by default |
 | Regulatory reclassification as credit | Medium | Structural non-lending design; no fee, no recourse |
-| Hourly workers get bad accrual | Medium | Explicitly unsupported rather than approximated |
+| Hourly workers get bad accrual | Low | Real timesheet-based accrual (000018); residual risk is admins rubber-stamping unverified entries, not the engine |
 
 **The risk being accepted deliberately:** graduated guardrails will let some users
 reach a level of dependency a hard cap would have prevented. That is a real cost.

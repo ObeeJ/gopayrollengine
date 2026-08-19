@@ -37,9 +37,11 @@ Don't add a mutable balance column. If you need a balance, sum the entries.
 transaction that writes the advance** — a client never supplies its own cap, and
 a concurrent request cannot race past one checked a moment earlier.
 
-- Accrual is straight-line over *working* days (`AccruedToDate`). The engine
-  assumes monthly salaried staff. Hourly accrual needs real timesheet data and is
-  deliberately unimplemented rather than approximated.
+- Accrual is straight-line over *working* days (`AccruedToDate`) for salaried
+  staff. Hourly/gig staff (`Employee.WageType == "hourly"`) accrue instead from
+  real approved `TimeEntry` rows (`accruedHourlyToDateTx`, migration 000018) —
+  never an assumed schedule. An unapproved entry counts toward nothing:
+  accrual, payroll, and dependency scoring all read only `status = 'approved'`.
 - Advances settle by netting out of the next payroll item, inside the payroll
   creation transaction (`SettleAdvancesForPayrollItem`). An advance that does not
   settle is money the business never recovers.

@@ -10,6 +10,16 @@ import (
 	"gorm.io/gorm"
 )
 
+// WageType distinguishes how an employee's pay is computed. Salaried staff
+// accrue straight-line across the month (AccruedToDate); hourly and gig staff
+// accrue only from approved TimeEntry rows — see migration 000018.
+type WageType string
+
+const (
+	WageSalaried WageType = "salaried"
+	WageHourly   WageType = "hourly"
+)
+
 // Employee — encrypted PII with an HMAC blind-index on email for per-org uniqueness.
 type Employee struct {
 	ID             string          `gorm:"primaryKey" json:"id"`
@@ -20,11 +30,22 @@ type Employee struct {
 	AccountNumber  EncryptedString `json:"account_number" binding:"required"`
 	BankCode       EncryptedString `json:"bank_code" binding:"required"`
 	Salary         money.Kobo      `gorm:"type:bigint;not null;default:0" json:"salary" binding:"required"`
-	IsActive       bool            `gorm:"default:true" json:"is_active"`
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
-	DeletedAt      gorm.DeletedAt  `gorm:"index" json:"-"`
+
+	// WageType and HourlyRateKobo govern hourly/gig accrual. Only one of
+	// Salary or HourlyRateKobo is meaningful, depending on WageType — see
+	// services.AccruedToDate (salaried) and accruedHourlyToDateTx (hourly).
+	WageType       WageType   `gorm:"column:wage_type;type:text;default:salaried" json:"wage_type"`
+	HourlyRateKobo money.Kobo `gorm:"column:hourly_rate_kobo;type:bigint;default:0" json:"hourly_rate_kobo"`
+
+	IsActive  bool           `gorm:"default:true" json:"is_active"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 }
+
+// IsHourly reports whether this employee accrues from timesheet entries
+// rather than a fixed monthly salary.
+func (e Employee) IsHourly() bool { return e.WageType == WageHourly }
 
 // BeforeSave — keeps EmailHMAC in sync with the plaintext Email before encryption.
 func (e *Employee) BeforeSave(tx *gorm.DB) error {

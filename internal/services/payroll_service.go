@@ -8,6 +8,7 @@ import (
 	"go-payroll-engine/internal/repository"
 	"go-payroll-engine/internal/workers"
 	"go-payroll-engine/pkg/money"
+	"time"
 
 	"github.com/hibiken/asynq"
 	"gorm.io/gorm"
@@ -47,18 +48,37 @@ func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string
 			return err
 		}
 
-		// Each item is gross salary minus any early wage access already drawn for
+		// Each item is gross pay minus any early wage access already drawn for
 		// this period. Netting here — inside the same transaction that settles the
 		// advance and posts the ledger entry — is what stops an advance from being
 		// money the business never gets back.
 		netAmounts := make([]money.Kobo, 0, len(employees))
 		for _, emp := range employees {
+			gross := emp.Salary
+			if emp.IsHourly() {
+				// Gross is real approved hours × rate, never the fixed Salary
+				// column, which hourly employees don't use. asOf=now is safe
+				// here: payroll normally runs after the period has closed, so
+				// SumApprovedMinutes' period boundary — not the asOf bound —
+				// is what limits the sum to this period's entries. An entry
+				// approved after this payroll already ran is out of scope for
+				// this run, the same way a late-approved advance would be.
+				minutes, err := models.SumApprovedMinutes(tx, orgID, emp.ID, period, time.Now())
+				if err != nil {
+					return fmt.Errorf("hourly accrual lookup for %s failed: %w", emp.ID, err)
+				}
+				gross, err = emp.HourlyRateKobo.Percent(minutes, 60)
+				if err != nil {
+					return fmt.Errorf("hourly gross computation for %s failed: %w", emp.ID, err)
+				}
+			}
+
 			item := models.PayrollItem{
 				OrganizationID: orgID,
 				PayrollID:      payroll.ID,
 				EmployeeID:     emp.ID,
 				EmployeeName:   emp.Name,
-				Amount:         emp.Salary,
+				Amount:         gross,
 				Status:         models.PayrollPending,
 			}
 			if err := txPayrollRepo.CreateItem(&item); err != nil {
@@ -70,9 +90,9 @@ func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string
 				return fmt.Errorf("advance settlement for %s failed: %w", emp.ID, err)
 			}
 
-			net := emp.Salary
+			net := gross
 			if withheld.IsPositive() {
-				net, err = emp.Salary.Sub(withheld)
+				net, err = gross.Sub(withheld)
 				if err != nil {
 					return fmt.Errorf("net pay computation for %s failed: %w", emp.ID, err)
 				}
@@ -82,8 +102,8 @@ func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string
 				// stopping the run.
 				if net.IsNegative() {
 					return fmt.Errorf(
-						"employee %s: advances (%s) exceed salary (%s) — refusing to build a negative payroll item",
-						emp.ID, withheld, emp.Salary)
+						"employee %s: advances (%s) exceed gross pay (%s) — refusing to build a negative payroll item",
+						emp.ID, withheld, gross)
 				}
 				if err := tx.Model(&models.PayrollItem{}).
 					Where("id = ?", item.ID).

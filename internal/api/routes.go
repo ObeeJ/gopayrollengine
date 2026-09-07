@@ -34,19 +34,20 @@ func SetupRouter() *gin.Engine {
 	r.GET("/readyz", healthHandler.Readiness)
 
 	// Repositories — one instance each, injected down the chain.
-	empRepo     := repository.NewEmployeeRepository(models.DB)
+	empRepo := repository.NewEmployeeRepository(models.DB)
 	payrollRepo := repository.NewPayrollRepository(models.DB)
-	orgRepo     := repository.NewOrganizationRepository(models.DB)
-	userRepo    := repository.NewUserRepository(models.DB)
+	orgRepo := repository.NewOrganizationRepository(models.DB)
+	userRepo := repository.NewUserRepository(models.DB)
 	// Handlers — dependencies injected, no handler touches models.DB directly.
-	authHandler       := &handlers.AuthHandler{OrgRepo: orgRepo}
+	authHandler := &handlers.AuthHandler{OrgRepo: orgRepo}
 	workerAuthHandler := handlers.NewWorkerAuthHandler(userRepo, empRepo)
-	empHandler        := handlers.NewEmployeeHandler(empRepo)
-	payrollHandler    := &handlers.PayrollHandler{Service: services.NewPayrollService(payrollRepo, empRepo)}
-	analyticsHandler  := &handlers.AnalyticsHandler{Service: services.NewAnalyticsService(payrollRepo, empRepo)}
-	advanceHandler    := handlers.NewAdvanceHandler(services.NewEWAService())
-	webhookHandler    := &handlers.WebhookHandler{}
-	consentHandler    := &handlers.ConsentHandler{}
+	empHandler := handlers.NewEmployeeHandler(empRepo)
+	payrollHandler := &handlers.PayrollHandler{Service: services.NewPayrollService(payrollRepo, empRepo)}
+	analyticsHandler := &handlers.AnalyticsHandler{Service: services.NewAnalyticsService(payrollRepo, empRepo)}
+	advanceHandler := handlers.NewAdvanceHandler(services.NewEWAService())
+	timeEntryHandler := handlers.NewTimeEntryHandler(services.NewTimeEntryService())
+	webhookHandler := &handlers.WebhookHandler{}
+	consentHandler := &handlers.ConsentHandler{}
 	complianceHandler := &handlers.ComplianceHandler{}
 
 	v1 := r.Group("/api/v1")
@@ -102,6 +103,15 @@ func SetupRouter() *gin.Engine {
 			{
 				compliance.GET("/report", complianceHandler.GetComplianceReport)
 			}
+
+			// Timesheet review — any employer role may view the queue, only
+			// admin may resolve it, matching the employee/payroll write gate.
+			timeEntries := employer.Group("/time-entries")
+			{
+				timeEntries.GET("/", timeEntryHandler.ListPendingTimeEntries)
+				timeEntries.POST("/:id/approve", middleware.RequireRole("admin"), timeEntryHandler.ApproveTimeEntry)
+				timeEntries.POST("/:id/reject", middleware.RequireRole("admin"), timeEntryHandler.RejectTimeEntry)
+			}
 		}
 
 		// Worker routes — JWT → tenant → residency → worker gate; same fence as employer side.
@@ -115,6 +125,8 @@ func SetupRouter() *gin.Engine {
 			worker.POST("/advances", advanceHandler.RequestAdvance)
 			worker.GET("/advances", advanceHandler.GetAdvanceHistory)
 			worker.POST("/protected-payday", advanceHandler.SetProtectedPayday)
+			worker.POST("/time-entries", timeEntryHandler.SubmitTimeEntry)
+			worker.GET("/time-entries", timeEntryHandler.GetTimeEntries)
 		}
 	}
 

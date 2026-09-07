@@ -26,15 +26,38 @@ func NewEmployeeHandler(r repository.EmployeeRepository) *EmployeeHandler {
 // CreateEmployee — admin-only; employee + consent + audit commit atomically, BVN reconciles out-of-band.
 func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 	var req struct {
-		Name          string     `json:"name" binding:"required"`
-		Email         string     `json:"email" binding:"required,email"`
-		AccountNumber string     `json:"account_number" binding:"required"`
-		BankCode      string     `json:"bank_code" binding:"required"`
-		Salary        money.Kobo `json:"salary" binding:"required"`
-		BVN           string     `json:"bvn" binding:"required"`
+		Name          string          `json:"name" binding:"required"`
+		Email         string          `json:"email" binding:"required,email"`
+		AccountNumber string          `json:"account_number" binding:"required"`
+		BankCode      string          `json:"bank_code" binding:"required"`
+		BVN           string          `json:"bvn" binding:"required"`
+		WageType      models.WageType `json:"wage_type"` // "salaried" (default) or "hourly"
+
+		// Exactly one of these must be set, per WageType. Not bound with
+		// "required" — required would demand both regardless of wage type.
+		Salary         money.Kobo `json:"salary"`
+		HourlyRateKobo money.Kobo `json:"hourly_rate_kobo"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.WageType == "" {
+		req.WageType = models.WageSalaried
+	}
+	switch req.WageType {
+	case models.WageSalaried:
+		if !req.Salary.IsPositive() {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "salary is required for a salaried employee"})
+			return
+		}
+	case models.WageHourly:
+		if !req.HourlyRateKobo.IsPositive() {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "hourly_rate_kobo is required for an hourly employee"})
+			return
+		}
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "wage_type must be 'salaried' or 'hourly'"})
 		return
 	}
 
@@ -45,7 +68,9 @@ func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 		Email:          models.EncryptedString(req.Email),
 		AccountNumber:  models.EncryptedString(req.AccountNumber),
 		BankCode:       models.EncryptedString(req.BankCode),
+		WageType:       req.WageType,
 		Salary:         req.Salary,
+		HourlyRateKobo: req.HourlyRateKobo,
 	}
 	expires := time.Now().AddDate(1, 0, 0)
 

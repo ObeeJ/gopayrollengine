@@ -42,12 +42,21 @@ func (p MonnifyWebhookPayload) disbursedKobo() (money.Kobo, error) {
 	return money.FromNairaString(p.EventData.Amount.String())
 }
 
-// HandleMonnifyWebhook — verifies HMAC, dedupes via bloom, then routes to the
-// payroll-item or EWA-advance handler by the reference's ID prefix. One
-// endpoint for both record types because Monnify's callback shape is
-// identical either way — the only thing that differs is which table the
-// reference belongs to, and this codebase already names every row with a
-// type-tagged prefix ("ITEM-", "EWA-") for exactly this kind of dispatch.
+// monnifyEnvelope reads just enough to decide which specific payload shape
+// this delivery actually has before committing to one. Monnify's reserved
+// account credit notification ("SUCCESSFUL_TRANSACTION") carries a completely
+// different eventData shape from a disbursement callback — same envelope,
+// same signature scheme, unrelated fields — so eventType has to be read first.
+type monnifyEnvelope struct {
+	EventType string `json:"eventType"`
+}
+
+// HandleMonnifyWebhook — verifies HMAC, then routes by eventType. Disbursement
+// callbacks (payroll items, EWA advances) dedupe via bloom and dispatch by the
+// reference's ID prefix, as before; a reserved-account credit notification
+// (an employer funding their EWA pool) is a structurally different event and
+// gets its own path. One endpoint for all of it because Monnify signs every
+// callback the same way regardless of event type.
 func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 	secret := os.Getenv("MONNIFY_SECRET_KEY")
 	signature := c.GetHeader("monnify-signature")
@@ -65,6 +74,17 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 	expectedSig := hex.EncodeToString(mac.Sum(nil))
 	if !hmac.Equal([]byte(signature), []byte(expectedSig)) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid signature"})
+		return
+	}
+
+	var envelope monnifyEnvelope
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload"})
+		return
+	}
+
+	if envelope.EventType == "SUCCESSFUL_TRANSACTION" {
+		h.handleFundingWebhook(c, body)
 		return
 	}
 
@@ -317,6 +337,81 @@ func (h *WebhookHandler) handleEWAAdvanceWebhook(c *gin.Context, payload Monnify
 
 	default:
 		c.Status(http.StatusOK)
+		return
+	}
+
+	markSeen(ref)
+	c.Status(http.StatusOK)
+}
+
+// MonnifyFundingWebhookPayload is Monnify's reserved-account credit
+// notification. developers.monnify.com was unreachable from the environment
+// this was built in (egress-blocked), so this shape follows Monnify's
+// long-documented convention rather than a direct read of current docs — see
+// the same disclosure on ReserveAccountRequest
+// (internal/integrations/monnify/client.go).
+type MonnifyFundingWebhookPayload struct {
+	EventData struct {
+		TransactionReference string      `json:"transactionReference"`
+		AmountPaid           json.Number `json:"amountPaid"`
+		Product              struct {
+			Reference string `json:"reference"`
+		} `json:"product"`
+	} `json:"eventData"`
+}
+
+// handleFundingWebhook credits an employer's EWA funding pool from a deposit
+// into their reserved account. Unlike a disbursement callback there is no
+// "expected amount" to compare against — any amount deposited is valid — so
+// this has no amount-mismatch path.
+func (h *WebhookHandler) handleFundingWebhook(c *gin.Context, body []byte) {
+	var payload MonnifyFundingWebhookPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload"})
+		return
+	}
+
+	ref := payload.EventData.TransactionReference
+	accountRef := payload.EventData.Product.Reference
+	if ref == "" || accountRef == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing transaction or account reference"})
+		return
+	}
+
+	if middleware.WebhookBloom != nil {
+		ctx := context.Background()
+		if seen, err := middleware.WebhookBloom.MightContain(ctx, ref); err == nil && seen {
+			c.Status(http.StatusOK)
+			return
+		}
+	}
+
+	// SECURITY DEFINER lookup (migration 000019) — same justification as
+	// lookup_ewa_advance_for_webhook: HMAC already authenticated the request,
+	// and the write below runs inside WithOrgScope using the org_id this
+	// lookup reveals.
+	var account models.OrganizationFundingAccount
+	if err := models.DB.Raw(
+		"SELECT * FROM lookup_org_for_funding_account(?)", accountRef,
+	).Scan(&account).Error; err != nil || account.OrganizationID == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Funding account not found"})
+		return
+	}
+
+	amountKobo, err := money.FromNairaString(payload.EventData.AmountPaid.String())
+	if err != nil {
+		middleware.Logger.Error("funding webhook amount unparseable",
+			"org_id", account.OrganizationID, "raw", payload.EventData.AmountPaid.String(), "error", err.Error())
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid amount"})
+		return
+	}
+
+	if err := models.WithOrgScope(c.Request.Context(), account.OrganizationID, func(tx *gorm.DB) error {
+		return models.RecordEmployerFunding(tx, account.OrganizationID, money.NGNFromKobo(amountKobo), ref)
+	}); err != nil {
+		middleware.Logger.Error("employer funding deposit failed",
+			"org_id", account.OrganizationID, "ref", ref, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "webhook processing failed"})
 		return
 	}
 

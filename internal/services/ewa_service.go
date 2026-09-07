@@ -29,6 +29,12 @@ const (
 	DeclineDrawLimit       = "draw_limit_reached"
 	DeclineNoSalaryOnFile  = "no_salary_on_file"
 	DeclineInactiveAccount = "inactive_account"
+	// DeclineFundingPoolExhausted fires only when the org has opted into
+	// require_funding_coverage and has drawn more than it has deposited —
+	// see FundingExposure. Distinct from DeclineExceedsEarned so a worker
+	// isn't told they haven't earned enough when the real cause is their
+	// employer's funding, not their own accrual.
+	DeclineFundingPoolExhausted = "funding_pool_exhausted"
 )
 
 // ErrAdvanceDeclined is returned when a request fails a guardrail. The advance
@@ -174,6 +180,13 @@ type Eligibility struct {
 	// Blocked is set when a guardrail currently prevents any draw.
 	Blocked       bool   `json:"blocked"`
 	BlockedReason string `json:"blocked_reason,omitempty"`
+
+	// FundingBound is set when the employer's funding pool — not the
+	// worker's own accrued wages — is the tightest constraint on Available.
+	// RequestAdvance reads this to attribute a decline correctly even when
+	// Available is still above MinimumDraw (so Blocked is false) but below
+	// the specific amount requested — see the decision switch there.
+	FundingBound bool `json:"-"`
 }
 
 // GetEligibility computes what a worker may draw right now, and why.
@@ -334,6 +347,28 @@ func (s *EWAService) eligibilityTx(tx *gorm.DB, orgID, employeeID string, asOf t
 			available = headroom
 		}
 	}
+
+	// Employer funding coverage — opt-in per org (migration 000019). Applied
+	// the same way as the worker's own floor: it can only narrow `available`,
+	// never widen it. fundingBound is tracked separately so a decline caused
+	// by an unfunded pool is reported as that, not as "you haven't earned
+	// enough" — the worker did nothing wrong here.
+	fundingBound := false
+	if policy.RequireFundingCoverage {
+		exposure, err := models.FundingExposure(tx, orgID, money.NGN)
+		if err != nil {
+			return nil, err
+		}
+		fundingHeadroom := money.Zero
+		if exposure.Minor < 0 {
+			fundingHeadroom = money.Kobo(-exposure.Minor)
+		}
+		if fundingHeadroom < available {
+			available = fundingHeadroom
+			fundingBound = true
+		}
+		el.FundingBound = fundingBound
+	}
 	el.Available = available
 
 	// What actually lands on payday, now and in the worst case. Based on
@@ -361,7 +396,12 @@ func (s *EWAService) eligibilityTx(tx *gorm.DB, orgID, employeeID string, asOf t
 		}
 	}
 	if available < policy.MinDrawKobo {
-		el.Blocked, el.BlockedReason = true, DeclineExceedsEarned
+		el.Blocked = true
+		if fundingBound {
+			el.BlockedReason = DeclineFundingPoolExhausted
+		} else {
+			el.BlockedReason = DeclineExceedsEarned
+		}
 	}
 	return el, nil
 }
@@ -423,6 +463,12 @@ func (s *EWAService) RequestAdvance(
 			reason = el.BlockedReason
 		case amount < el.MinimumDraw:
 			reason = DeclineBelowMinimum
+		case amount > el.Available && el.FundingBound:
+			// The funding pool, not the worker's own earnings, is what capped
+			// Available below the requested amount — same attribution as the
+			// el.Blocked case above, just below the MinimumDraw threshold that
+			// trips Blocked. See the FundingBound doc comment.
+			reason = DeclineFundingPoolExhausted
 		case amount > el.Available:
 			reason = DeclineExceedsEarned
 		}

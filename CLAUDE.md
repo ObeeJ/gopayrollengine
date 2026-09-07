@@ -56,6 +56,12 @@ a concurrent request cannot race past one checked a moment earlier.
   a payday lender at multiples of our cost; it does not remove the need. Every
   tier retains `EmergencyFloorKobo`, and a test asserts it. If you find yourself
   changing that test, it is the wrong fix.
+- Employer funding coverage (`ewa_policies.require_funding_coverage`, migration
+  000019) is opt-in and off by default. `models.FundingExposure` reads
+  `cash_settlement`'s own balance as "cumulative advances minus cumulative
+  employer deposits" — deliberately no new account type and no change to
+  `postAdvanceLedger`'s existing entries; see the migration comment before
+  touching either of those two accounts' meaning.
 - No fee, no recourse beyond payroll deduction, no collections, no credit
   reporting. That is the regulatory position, not only an ethical preference —
   see `docs/EWA_ROADMAP.md` §7. `fee_kobo` exists and defaults to zero; enabling

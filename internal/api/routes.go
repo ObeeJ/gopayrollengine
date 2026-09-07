@@ -3,6 +3,7 @@ package api
 import (
 	"go-payroll-engine/internal/api/handlers"
 	"go-payroll-engine/internal/api/middleware"
+	"go-payroll-engine/internal/integrations/monnify"
 	"go-payroll-engine/internal/models"
 	"go-payroll-engine/internal/repository"
 	"go-payroll-engine/internal/services"
@@ -46,6 +47,7 @@ func SetupRouter() *gin.Engine {
 	analyticsHandler := &handlers.AnalyticsHandler{Service: services.NewAnalyticsService(payrollRepo, empRepo)}
 	advanceHandler := handlers.NewAdvanceHandler(services.NewEWAService())
 	timeEntryHandler := handlers.NewTimeEntryHandler(services.NewTimeEntryService())
+	fundingHandler := handlers.NewFundingHandler(services.NewFundingService(monnify.NewClient()))
 	webhookHandler := &handlers.WebhookHandler{}
 	consentHandler := &handlers.ConsentHandler{}
 	complianceHandler := &handlers.ComplianceHandler{}
@@ -111,6 +113,12 @@ func SetupRouter() *gin.Engine {
 				timeEntries.GET("/", timeEntryHandler.ListPendingTimeEntries)
 				timeEntries.POST("/:id/approve", middleware.RequireRole("admin"), timeEntryHandler.ApproveTimeEntry)
 				timeEntries.POST("/:id/reject", middleware.RequireRole("admin"), timeEntryHandler.RejectTimeEntry)
+			}
+
+			fundingAccount := employer.Group("/funding-account")
+			{
+				fundingAccount.GET("/", fundingHandler.GetFundingStatus)
+				fundingAccount.POST("/", middleware.RequireRole("admin"), fundingHandler.ProvisionFundingAccount)
 			}
 		}
 

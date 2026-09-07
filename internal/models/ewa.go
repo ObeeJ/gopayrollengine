@@ -96,6 +96,13 @@ type EWAPolicy struct {
 	CoolingOffHours    int        `gorm:"default:24" json:"cooling_off_hours"`
 	EmergencyFloorKobo money.Kobo `gorm:"column:emergency_floor_kobo;type:bigint" json:"emergency_floor_kobo"`
 
+	// RequireFundingCoverage gates approval on the org having deposited at
+	// least as much as it has disbursed (see models.FundingExposure). Off by
+	// default: every org running EWA before migration 000019 has zero
+	// deposits on record, and flipping this on unconditionally would block
+	// all of them from any further draw the moment it ships.
+	RequireFundingCoverage bool `gorm:"column:require_funding_coverage;default:false" json:"require_funding_coverage"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

@@ -85,7 +85,12 @@ func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string
 				return err
 			}
 
-			withheld, err := s.ewa.SettleAdvancesForPayrollItem(tx, orgID, emp.ID, period, item.ID)
+			// gross caps what settlement may withhold: SettleAdvancesForPayrollItem
+			// recovers outstanding advances up to this item's gross pay and, if a
+			// worker's total outstanding exceeds it, settles the remainder
+			// partially rather than pushing net pay negative — see that
+			// function's comment.
+			withheld, err := s.ewa.SettleAdvancesForPayrollItem(tx, orgID, emp.ID, period, item.ID, gross)
 			if err != nil {
 				return fmt.Errorf("advance settlement for %s failed: %w", emp.ID, err)
 			}
@@ -96,10 +101,9 @@ func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string
 				if err != nil {
 					return fmt.Errorf("net pay computation for %s failed: %w", emp.ID, err)
 				}
-				// An advance can never exceed accrued wages, so this should be
-				// unreachable. If it ever fires the ledger and the accrual engine
-				// disagree, and paying a negative amount would be far worse than
-				// stopping the run.
+				// withheld is capped at gross by construction, so this is
+				// unreachable — kept as a belt-and-suspenders check: paying a
+				// negative amount would be far worse than stopping the run.
 				if net.IsNegative() {
 					return fmt.Errorf(
 						"employee %s: advances (%s) exceed gross pay (%s) — refusing to build a negative payroll item",

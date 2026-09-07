@@ -300,7 +300,7 @@ func TestSettleAdvancesForPayrollItem_UndisbursedAdvanceIsCancelledNotDeducted(t
 	var withheld money.Kobo
 	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
 		var err error
-		withheld, err = svc.SettleAdvancesForPayrollItem(tx, orgID, employeeID, period, "ITEM-X")
+		withheld, err = svc.SettleAdvancesForPayrollItem(tx, orgID, employeeID, period, "ITEM-X", money.FromNaira(300_000))
 		return err
 	}))
 
@@ -346,7 +346,7 @@ func TestSettleAdvancesForPayrollItem_RecoversTheAdvance(t *testing.T) {
 	var withheld money.Kobo
 	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
 		var err error
-		withheld, err = svc.SettleAdvancesForPayrollItem(tx, orgID, employeeID, period, payrollItemID)
+		withheld, err = svc.SettleAdvancesForPayrollItem(tx, orgID, employeeID, period, payrollItemID, salary)
 		return err
 	}))
 
@@ -387,12 +387,12 @@ func TestSettleAdvancesForPayrollItem_IsIdempotent(t *testing.T) {
 	var first, second money.Kobo
 	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
 		var err error
-		first, err = svc.SettleAdvancesForPayrollItem(tx, orgID, employeeID, period, "ITEM-A")
+		first, err = svc.SettleAdvancesForPayrollItem(tx, orgID, employeeID, period, "ITEM-A", money.FromNaira(300_000))
 		return err
 	}))
 	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
 		var err error
-		second, err = svc.SettleAdvancesForPayrollItem(tx, orgID, employeeID, period, "ITEM-B")
+		second, err = svc.SettleAdvancesForPayrollItem(tx, orgID, employeeID, period, "ITEM-B", money.FromNaira(300_000))
 		return err
 	}))
 
@@ -407,6 +407,147 @@ func TestSettleAdvancesForPayrollItem_IsIdempotent(t *testing.T) {
 		assert.Equal(t, ngnMoney(0), bal, "the receivable must not go negative")
 		return nil
 	}))
+}
+
+// When a payroll item's gross pay can't cover a worker's full outstanding
+// advance, settlement must recover as much as it can rather than either
+// blocking the whole payroll batch or driving net pay negative. The advance
+// stays Disbursed — not Settled — with the shortfall tracked in
+// RecoveredKobo/RemainingKobo for a later payroll run to pick up.
+func TestSettleAdvancesForPayrollItem_PartialWhenAvailableIsInsufficient(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	drawn := money.FromNaira(5_000)
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, drawn, "partial-1", "127.0.0.1")
+	require.NoError(t, err)
+	markDisbursed(t, orgID, advance.ID)
+
+	period := time.Now().Format(PeriodLayout)
+	available := money.FromNaira(2_000) // less than the 5,000 owed
+
+	var withheld money.Kobo
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		var err error
+		withheld, err = svc.SettleAdvancesForPayrollItem(tx, orgID, employeeID, period, "ITEM-PARTIAL-1", available)
+		return err
+	}))
+
+	assert.Equal(t, available, withheld, "only what's available may be withheld")
+
+	var after models.EWAAdvance
+	require.NoError(t, models.DB.First(&after, "id = ?", advance.ID).Error)
+	assert.Equal(t, models.AdvanceDisbursed, after.Status, "a partially settled advance stays outstanding")
+	assert.Equal(t, available, after.RecoveredKobo)
+	assert.Equal(t, drawn-available, after.RemainingKobo())
+	assert.Nil(t, after.SettledPayrollItemID, "not yet fully settled, so no settlement item is recorded")
+
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		recv, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable, money.NGN)
+		require.NoError(t, err)
+		bal, err := models.AccountBalance(tx, recv.ID)
+		require.NoError(t, err)
+		assert.Equal(t, ngnMoney(3_000), bal, "the unrecovered 3,000 remains a live receivable")
+		return nil
+	}))
+}
+
+// A later payroll run — same advance, same period, a fresh payroll item —
+// must be able to finish recovering what an earlier run's partial settlement
+// left behind, and only then transition the advance to Settled.
+func TestSettleAdvancesForPayrollItem_PartialThenCompletesOnNextRun(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	drawn := money.FromNaira(5_000)
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, drawn, "partial-2", "127.0.0.1")
+	require.NoError(t, err)
+	markDisbursed(t, orgID, advance.ID)
+
+	period := time.Now().Format(PeriodLayout)
+
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		_, err := svc.SettleAdvancesForPayrollItem(tx, orgID, employeeID, period, "ITEM-PARTIAL-2A", money.FromNaira(2_000))
+		return err
+	}))
+
+	var second money.Kobo
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		var err error
+		second, err = svc.SettleAdvancesForPayrollItem(tx, orgID, employeeID, period, "ITEM-PARTIAL-2B", money.FromNaira(300_000))
+		return err
+	}))
+	assert.Equal(t, money.FromNaira(3_000), second, "only the remaining 3,000 is left to withhold")
+
+	var after models.EWAAdvance
+	require.NoError(t, models.DB.First(&after, "id = ?", advance.ID).Error)
+	assert.Equal(t, models.AdvanceSettled, after.Status)
+	assert.Equal(t, drawn, after.RecoveredKobo)
+	assert.Equal(t, money.Zero, after.RemainingKobo())
+	require.NotNil(t, after.SettledPayrollItemID)
+	assert.Equal(t, "ITEM-PARTIAL-2B", *after.SettledPayrollItemID, "the item that finished recovery is the one recorded")
+
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		recv, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable, money.NGN)
+		require.NoError(t, err)
+		bal, err := models.AccountBalance(tx, recv.ID)
+		require.NoError(t, err)
+		assert.Equal(t, ngnMoney(0), bal, "fully recovered — nothing left owed")
+		return nil
+	}))
+}
+
+// With several outstanding advances and only enough available to cover some
+// of them, the oldest draw must be recovered first, matching how a worker
+// would expect their debts to be worked down.
+func TestSettleAdvancesForPayrollItem_OldestAdvanceRecoveredFirst(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	period := time.Now().Format(PeriodLayout)
+
+	older, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, money.FromNaira(3_000), "order-older", "127.0.0.1")
+	require.NoError(t, err)
+	markDisbursed(t, orgID, older.ID)
+
+	// Inserted directly rather than through RequestAdvance: the cooling-off
+	// guardrail would otherwise block a second draw for the same worker
+	// moments after the first, which has nothing to do with what this test
+	// checks — recovery order, not draw eligibility.
+	newer := models.EWAAdvance{
+		OrganizationID: orgID,
+		EmployeeID:     employeeID,
+		Period:         period,
+		AmountKobo:     money.FromNaira(3_000),
+		Status:         models.AdvanceDisbursed,
+		DependencyTier: models.TierHealthy,
+		RequestedAt:    older.RequestedAt.Add(time.Hour),
+	}
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return tx.Create(&newer).Error
+	}))
+	// Enough to fully cover the older draw plus part of the newer one.
+	available := money.FromNaira(4_000)
+
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		_, err := svc.SettleAdvancesForPayrollItem(tx, orgID, employeeID, period, "ITEM-ORDER", available)
+		return err
+	}))
+
+	var olderAfter, newerAfter models.EWAAdvance
+	require.NoError(t, models.DB.First(&olderAfter, "id = ?", older.ID).Error)
+	require.NoError(t, models.DB.First(&newerAfter, "id = ?", newer.ID).Error)
+
+	assert.Equal(t, models.AdvanceSettled, olderAfter.Status, "the older draw is fully recovered first")
+	assert.Equal(t, models.AdvanceDisbursed, newerAfter.Status, "the newer draw only gets what's left")
+	assert.Equal(t, money.FromNaira(1_000), newerAfter.RecoveredKobo)
+	assert.Equal(t, money.FromNaira(2_000), newerAfter.RemainingKobo())
 }
 
 // setupRLSTestRole creates a NOSUPERUSER role the RLS assertions pivot into via

@@ -571,7 +571,8 @@ func (s *EWAService) postAdvanceLedger(tx *gorm.DB, orgID, employeeID string, ad
 
 // SettleAdvancesForPayrollItem nets a worker's outstanding advances out of one
 // payroll item and records the recovery in the ledger. Returns the amount
-// withheld. Called inside the payroll creation transaction.
+// withheld, which never exceeds `available` — the item's gross pay. Called
+// inside the payroll creation transaction.
 //
 // Only *disbursed* advances are recovered:
 //
@@ -586,15 +587,25 @@ func (s *EWAService) postAdvanceLedger(tx *gorm.DB, orgID, employeeID string, ad
 //
 //	Dr cash_settlement     (org)       the committed cash was never sent
 //	Cr advance_receivable  (employee)  the receivable is written back
+//
+// Disbursed advances older first (RequestedAt ascending) are recovered in
+// full until `available` runs out. If a worker's outstanding advances exceed
+// what this item can cover — several small draws stacked up, or a policy cap
+// tightened after they were disbursed — the last advance touched is settled
+// **partially**: only `available`'s remainder is withheld and recorded
+// against RecoveredKobo, the advance stays Disbursed, and whatever is left
+// waits for a future payroll run rather than either blocking this entire
+// payroll batch or forcing net pay negative. Any advance still untouched
+// after `available` reaches zero is left exactly as it was.
 func (s *EWAService) SettleAdvancesForPayrollItem(
-	tx *gorm.DB, orgID, employeeID, period, payrollItemID string,
+	tx *gorm.DB, orgID, employeeID, period, payrollItemID string, available money.Kobo,
 ) (money.Kobo, error) {
 	var advances []models.EWAAdvance
 	if err := tx.Where(
 		"organization_id = ? AND employee_id = ? AND period = ? AND status IN ?",
 		orgID, employeeID, period,
 		[]models.AdvanceStatus{models.AdvanceApproved, models.AdvanceDisbursed},
-	).Find(&advances).Error; err != nil {
+	).Order("requested_at ASC").Find(&advances).Error; err != nil {
 		return 0, err
 	}
 	if len(advances) == 0 {
@@ -611,13 +622,15 @@ func (s *EWAService) SettleAdvancesForPayrollItem(
 	}
 
 	var withheld money.Kobo
+	remaining := available
 	for i := range advances {
 		adv := &advances[i]
 
 		if adv.Status == models.AdvanceApproved {
 			// Committed but never disbursed by settlement time. Cancel it and
 			// reverse the receivable; the worker gets their full pay. Shared with
-			// the disbursement webhook's failure path — see CancelAdvance.
+			// the disbursement webhook's failure path — see CancelAdvance. No
+			// cash moved, so this doesn't touch `remaining`.
 			if err := models.CancelAdvance(tx, adv, models.AdvanceApproved, "settled_before_disbursement"); err != nil {
 				if errors.Is(err, models.ErrStaleStatus) {
 					continue
@@ -627,36 +640,79 @@ func (s *EWAService) SettleAdvancesForPayrollItem(
 			continue
 		}
 
-		if err := models.TransitionAdvance(tx, adv, models.AdvanceDisbursed, models.AdvanceSettled); err != nil {
-			if errors.Is(err, models.ErrStaleStatus) {
-				continue // another settlement pass won
-			}
-			return 0, err
+		owed := adv.RemainingKobo()
+		if !owed.IsPositive() {
+			continue // fully recovered by an earlier partial pass
 		}
-		if err := tx.Model(&models.EWAAdvance{}).Where("id = ?", adv.ID).
-			Update("settled_payroll_item_id", payrollItemID).Error; err != nil {
-			return 0, err
+		portion := owed
+		if remaining < owed {
+			portion = remaining
+		}
+		if !portion.IsPositive() {
+			continue // this item's net pay is already exhausted; later advances wait for a future run
 		}
 
 		if _, err := models.PostTransaction(tx, models.PostingRequest{
-			OrgID:          orgID,
-			Kind:           "ewa_settlement",
-			Reference:      adv.ID,
-			IdempotencyKey: "ewa_settlement:" + adv.ID,
+			OrgID:     orgID,
+			Kind:      "ewa_settlement",
+			Reference: adv.ID,
+			// Keyed per (advance, payroll item), not just per advance: a
+			// partially recovered advance is legitimately posted against more
+			// than one payroll item over time, and each such installment must
+			// get its own idempotency key while a retry of the same item stays
+			// a no-op.
+			IdempotencyKey: "ewa_settlement:" + adv.ID + ":" + payrollItemID,
 			Entries: []models.EntryInput{
-				{AccountID: payable.ID, Direction: models.Debit, Amount: money.NGNFromKobo(adv.AmountKobo)},
-				{AccountID: receivable.ID, Direction: models.Credit, Amount: money.NGNFromKobo(adv.AmountKobo)},
+				{AccountID: payable.ID, Direction: models.Debit, Amount: money.NGNFromKobo(portion)},
+				{AccountID: receivable.ID, Direction: models.Credit, Amount: money.NGNFromKobo(portion)},
 			},
 		}); err != nil {
 			observability.LedgerImbalanceTotal.WithLabelValues(orgID).Inc()
 			return 0, err
 		}
 
-		next, err := withheld.Add(adv.AmountKobo)
+		recoveredTotal, addErr := adv.RecoveredKobo.Add(portion)
+		if addErr != nil {
+			return 0, fmt.Errorf("recovered total overflow: %w", addErr)
+		}
+		res := tx.Model(&models.EWAAdvance{}).
+			Where("id = ? AND recovered_kobo = ?", adv.ID, adv.RecoveredKobo).
+			Update("recovered_kobo", recoveredTotal)
+		if res.Error != nil {
+			return 0, res.Error
+		}
+		if res.RowsAffected == 0 {
+			return 0, fmt.Errorf("%w: recovered_kobo changed concurrently for %s", models.ErrStaleStatus, adv.ID)
+		}
+		adv.RecoveredKobo = recoveredTotal
+
+		if recoveredTotal >= adv.AmountKobo {
+			if err := models.TransitionAdvance(tx, adv, models.AdvanceDisbursed, models.AdvanceSettled); err != nil {
+				if !errors.Is(err, models.ErrStaleStatus) {
+					return 0, err
+				}
+			} else if err := tx.Model(&models.EWAAdvance{}).Where("id = ?", adv.ID).
+				Update("settled_payroll_item_id", payrollItemID).Error; err != nil {
+				return 0, err
+			}
+		} else {
+			if err := models.AppendAuditTx(tx, orgID, "EWAAdvance", adv.ID, "partially_settled",
+				portion.String(), fmt.Sprintf("remaining=%s payroll_item=%s", adv.RemainingKobo(), payrollItemID),
+				"internal", ""); err != nil {
+				return 0, err
+			}
+		}
+
+		next, err := withheld.Add(portion)
 		if err != nil {
 			return 0, fmt.Errorf("settlement total overflow: %w", err)
 		}
 		withheld = next
+
+		remaining, err = remaining.Sub(portion)
+		if err != nil {
+			return 0, fmt.Errorf("available cap underflow: %w", err)
+		}
 	}
 	return withheld, nil
 }
@@ -803,14 +859,19 @@ func (s *EWAService) outstandingTx(
 
 	for _, r := range rows {
 		if r.IsOutstanding() {
-			next, addErr := outstanding.Add(r.AmountKobo)
+			// RemainingKobo, not AmountKobo: a partially settled advance
+			// (SettleAdvancesForPayrollItem could only cover part of it from a
+			// prior payroll run) has already given up some of what it owed, and
+			// must not keep consuming the full original amount against this
+			// period's draw cap or payday projection.
+			next, addErr := outstanding.Add(r.RemainingKobo())
 			if addErr != nil {
 				return 0, 0, 0, time.Time{}, fmt.Errorf("outstanding total overflow: %w", addErr)
 			}
 			outstanding = next
 
 			if r.Status == models.AdvanceDisbursed {
-				next, addErr := recoverable.Add(r.AmountKobo)
+				next, addErr := recoverable.Add(r.RemainingKobo())
 				if addErr != nil {
 					return 0, 0, 0, time.Time{}, fmt.Errorf("recoverable total overflow: %w", addErr)
 				}

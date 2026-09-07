@@ -140,6 +140,15 @@ type EWAAdvance struct {
 	FeeKobo    money.Kobo    `gorm:"column:fee_kobo;type:bigint;default:0" json:"fee_kobo"`
 	Status     AdvanceStatus `gorm:"default:requested" json:"status"`
 
+	// RecoveredKobo is how much of AmountKobo payroll has actually withheld so
+	// far. A Disbursed advance whose RecoveredKobo is less than AmountKobo
+	// still owes RemainingKobo() — settlement recovers what a given payroll
+	// run's net pay can cover and leaves the rest outstanding (still
+	// Disbursed) rather than either blocking the whole payroll batch or
+	// paying the worker a negative amount. Only reaching RecoveredKobo ==
+	// AmountKobo transitions the advance to Settled.
+	RecoveredKobo money.Kobo `gorm:"column:recovered_kobo;type:bigint;default:0" json:"recovered_kobo"`
+
 	// Decision evidence, frozen at request time so the decision stays auditable.
 	AccruedAtRequestKobo   money.Kobo     `gorm:"column:accrued_at_request_kobo;type:bigint" json:"accrued_at_request_kobo"`
 	AvailableAtRequestKobo money.Kobo     `gorm:"column:available_at_request_kobo;type:bigint" json:"available_at_request_kobo"`
@@ -182,6 +191,16 @@ func (a *EWAAdvance) BeforeCreate(tx *gorm.DB) error {
 // IsOutstanding reports whether this advance still represents money owed.
 func (a *EWAAdvance) IsOutstanding() bool {
 	return a.Status == AdvanceApproved || a.Status == AdvanceDisbursed
+}
+
+// RemainingKobo is how much of this advance is still owed — AmountKobo minus
+// whatever settlement has already recovered. Zero once fully settled.
+func (a *EWAAdvance) RemainingKobo() money.Kobo {
+	remaining, err := a.AmountKobo.Sub(a.RecoveredKobo)
+	if err != nil || remaining.IsNegative() {
+		return 0
+	}
+	return remaining
 }
 
 // EWAAccrualSnapshot — a dated record of what a worker had earned, kept so an

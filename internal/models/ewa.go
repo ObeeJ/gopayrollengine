@@ -185,7 +185,10 @@ func (a *EWAAdvance) IsOutstanding() bool {
 }
 
 // EWAAccrualSnapshot — a dated record of what a worker had earned, kept so an
-// eligibility decision can be reconstructed during a dispute.
+// eligibility decision can be reconstructed during a dispute. WageType and
+// HourlyRateKobo (migration 000020) record which basis the snapshot used —
+// SalaryKobo alone is meaningless for an hourly employee, who doesn't use
+// that column at all (see Employee.WageType).
 type EWAAccrualSnapshot struct {
 	ID             int64      `gorm:"primaryKey;autoIncrement" json:"id"`
 	OrganizationID string     `gorm:"index;not null" json:"organization_id"`
@@ -194,7 +197,11 @@ type EWAAccrualSnapshot struct {
 	AsOfDate       time.Time  `gorm:"type:date;not null" json:"as_of_date"`
 	AccruedKobo    money.Kobo `gorm:"column:accrued_kobo;type:bigint" json:"accrued_kobo"`
 	SalaryKobo     money.Kobo `gorm:"column:salary_kobo;type:bigint" json:"salary_kobo"`
-	CreatedAt      time.Time  `json:"created_at"`
+
+	WageType       WageType   `gorm:"column:wage_type;type:text;default:salaried" json:"wage_type"`
+	HourlyRateKobo money.Kobo `gorm:"column:hourly_rate_kobo;type:bigint;default:0" json:"hourly_rate_kobo"`
+
+	CreatedAt time.Time `json:"created_at"`
 }
 
 func (EWAAccrualSnapshot) TableName() string { return "ewa_accrual_snapshots" }

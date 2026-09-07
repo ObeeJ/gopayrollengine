@@ -53,6 +53,15 @@ func main() {
 		if err := collector.Collect(time.Now().AddDate(0, 0, -1)); err != nil {
 			log.Fatal("Evidence collection failed:", err)
 		}
+	case "snapshot-accruals":
+		// Wire this to a daily cron too. Snapshots today's accrual, not
+		// yesterday's — the point is to freeze what an eligibility decision
+		// made today was actually based on, before anything about the
+		// employee (salary, hours approved since) can change under it.
+		collector := services.NewAccrualSnapshotCollector()
+		if err := collector.Collect(context.Background(), time.Now()); err != nil {
+			log.Fatal("Accrual snapshot failed:", err)
+		}
 	default:
 		startAPI(cfg.Port)
 	}

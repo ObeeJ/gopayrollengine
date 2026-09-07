@@ -72,6 +72,7 @@ func (h *AdvanceHandler) GetEarnedWages(c *gin.Context) {
 			"score":   el.Dependency.Score,
 			"signals": el.Dependency.Signals,
 			"notes":   el.Dependency.Reasons,
+			"nudge":   el.Dependency.Nudge,
 		},
 	})
 }
@@ -117,6 +118,7 @@ func (h *AdvanceHandler) RequestAdvance(c *gin.Context) {
 			body["wellbeing"] = gin.H{
 				"tier":  el.Dependency.Tier,
 				"notes": el.Dependency.Reasons,
+				"nudge": el.Dependency.Nudge,
 			}
 		}
 		c.JSON(http.StatusUnprocessableEntity, body)

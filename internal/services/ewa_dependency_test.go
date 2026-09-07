@@ -276,6 +276,46 @@ func TestScaleScore(t *testing.T) {
 	assert.Equal(t, 10, scaleScore(2, 1, 4, 30), "linear in between")
 }
 
+func TestTierNudge_HealthyHasNone(t *testing.T) {
+	assert.Empty(t, TierNudge(models.TierHealthy))
+}
+
+func TestTierNudge_ElevatedAndAboveAllHaveDistinctMessages(t *testing.T) {
+	tiers := []models.DependencyTier{models.TierElevated, models.TierStrained, models.TierDependent}
+	seen := map[string]bool{}
+	for _, tier := range tiers {
+		msg := TierNudge(tier)
+		assert.NotEmpty(t, msg, "tier %s must have a nudge message", tier)
+		assert.False(t, seen[msg], "tier %s reuses another tier's message verbatim", tier)
+		seen[msg] = true
+	}
+}
+
+// ScoreDependency must wire Nudge from the final Tier — reusing the known
+// saturated-user scenario from TestScoreDependency_SaturatedUserReachesDependent
+// rather than hand-constructing a new draw history, since getting the scoring
+// math to land on a specific tier by hand is exactly the kind of arithmetic
+// this package's own tests exist to double-check, not assume.
+func TestScoreDependency_NudgeMatchesFinalTier(t *testing.T) {
+	got := ScoreDependency(DependencyInput{
+		Now:           scoringNow,
+		Draws:         draws(60, 1, 0, money.FromNaira(50_000)),
+		MonthlySalary: money.FromNaira(300_000),
+	})
+	require.Equal(t, models.TierDependent, got.Tier, "test setup must actually land on Dependent")
+	assert.Equal(t, TierNudge(models.TierDependent), got.Nudge)
+	assert.NotEmpty(t, got.Nudge)
+}
+
+func TestScoreDependency_HealthyNudgeIsEmpty(t *testing.T) {
+	got := ScoreDependency(DependencyInput{
+		Now:           scoringNow,
+		MonthlySalary: money.FromNaira(300_000),
+	})
+	assert.Equal(t, models.TierHealthy, got.Tier)
+	assert.Empty(t, got.Nudge)
+}
+
 func TestScoreDependency_SignalsAlwaysPopulated(t *testing.T) {
 	got := ScoreDependency(DependencyInput{
 		Now:           scoringNow,

@@ -597,12 +597,21 @@ func (s *EWAService) postAdvanceLedger(tx *gorm.DB, orgID, employeeID string, ad
 // waits for a future payroll run rather than either blocking this entire
 // payroll batch or forcing net pay negative. Any advance still untouched
 // after `available` reaches zero is left exactly as it was.
+//
+// Looks at `period` and every period before it, not just an exact match:
+// draw in August, settle across September and October is the point — an
+// advance whose own period's payroll couldn't fully recover it (or, for an
+// Approved one, never got disbursed before its period's payroll ran) simply
+// stays outstanding and is picked up by the next payroll run that has room
+// for it, however many periods later that turns out to be. PeriodLayout
+// ("2006-01") sorts lexicographically the same as chronologically, so a
+// plain string comparison is enough.
 func (s *EWAService) SettleAdvancesForPayrollItem(
 	tx *gorm.DB, orgID, employeeID, period, payrollItemID string, available money.Kobo,
 ) (money.Kobo, error) {
 	var advances []models.EWAAdvance
 	if err := tx.Where(
-		"organization_id = ? AND employee_id = ? AND period = ? AND status IN ?",
+		"organization_id = ? AND employee_id = ? AND period <= ? AND status IN ?",
 		orgID, employeeID, period,
 		[]models.AdvanceStatus{models.AdvanceApproved, models.AdvanceDisbursed},
 	).Order("requested_at ASC").Find(&advances).Error; err != nil {
@@ -829,60 +838,79 @@ func (s *EWAService) drawHistoryTx(tx *gorm.DB, orgID, employeeID string, asOf t
 	return events, nil
 }
 
-// outstandingTx sums unsettled advances for the period and reports draw count
-// and the most recent draw time, which drive the velocity guardrails.
+// outstandingTx sums a worker's still-open debt and reports this period's own
+// draw count and most recent draw time, which drive the velocity guardrails.
 //
-// Two totals are returned because they answer different questions:
+// Two different scopes, deliberately:
 //
-//   - outstanding (approved + disbursed) is what still counts against this
-//     period's allowance. An approved-but-undisbursed advance is a committed
-//     draw the worker cannot request again, so it must shrink the cap.
-//   - recoverable (disbursed only) is what payroll will actually deduct.
-//     SettleAdvancesForPayrollItem cancels an approved advance that never
-//     disbursed rather than withholding it — see that function's comment — so
-//     an approved-but-undisbursed advance must NOT reduce the payday
-//     projection or it tells the worker a smaller number than they will
-//     actually be paid.
+//   - drawCount / lastDrawAt look only at THIS period's own rows. Velocity
+//     guardrails (MaxDrawsPerPeriod, cooling-off) reset each period — a draw
+//     from August must not count against September's limit.
+//   - outstanding / recoverable sum every still-open advance regardless of
+//     which period it was drawn in. A partially recovered advance from an
+//     earlier period (SettleAdvancesForPayrollItem could only cover part of
+//     it before that period's payroll ran out of gross pay) is still money
+//     the worker owes, and must keep shrinking this period's draw cap and
+//     payday projection — the calendar turning over doesn't reset a debt.
+//
+// outstanding (approved + disbursed) is what counts against the draw cap. An
+// approved-but-undisbursed advance is a committed draw the worker cannot
+// request again, so it must shrink the cap. recoverable (disbursed only) is
+// the narrower figure that actually funds the payday projection:
+// SettleAdvancesForPayrollItem cancels an approved advance that never
+// disbursed rather than withholding it — see that function's comment — so an
+// approved-but-undisbursed advance must NOT reduce the payday projection or
+// it tells the worker a smaller number than they will actually be paid.
 func (s *EWAService) outstandingTx(
 	tx *gorm.DB, orgID, employeeID, period string,
 ) (outstanding, recoverable money.Kobo, drawCount int, lastDrawAt time.Time, err error) {
-	var rows []models.EWAAdvance
+	var currentPeriod []models.EWAAdvance
 	if err := tx.Where(
 		"organization_id = ? AND employee_id = ? AND period = ? AND status IN ?",
 		orgID, employeeID, period,
 		[]models.AdvanceStatus{
 			models.AdvanceApproved, models.AdvanceDisbursed, models.AdvanceSettled,
 		},
-	).Find(&rows).Error; err != nil {
+	).Find(&currentPeriod).Error; err != nil {
 		return 0, 0, 0, time.Time{}, err
 	}
-
-	for _, r := range rows {
-		if r.IsOutstanding() {
-			// RemainingKobo, not AmountKobo: a partially settled advance
-			// (SettleAdvancesForPayrollItem could only cover part of it from a
-			// prior payroll run) has already given up some of what it owed, and
-			// must not keep consuming the full original amount against this
-			// period's draw cap or payday projection.
-			next, addErr := outstanding.Add(r.RemainingKobo())
-			if addErr != nil {
-				return 0, 0, 0, time.Time{}, fmt.Errorf("outstanding total overflow: %w", addErr)
-			}
-			outstanding = next
-
-			if r.Status == models.AdvanceDisbursed {
-				next, addErr := recoverable.Add(r.RemainingKobo())
-				if addErr != nil {
-					return 0, 0, 0, time.Time{}, fmt.Errorf("recoverable total overflow: %w", addErr)
-				}
-				recoverable = next
-			}
-		}
+	drawCount = len(currentPeriod)
+	for _, r := range currentPeriod {
 		if r.RequestedAt.After(lastDrawAt) {
 			lastDrawAt = r.RequestedAt
 		}
 	}
-	return outstanding, recoverable, len(rows), lastDrawAt, nil
+
+	// period <= ?, not period = ?: an advance drawn in an earlier period that
+	// this period's own payroll hasn't fully recovered yet (see
+	// SettleAdvancesForPayrollItem) is still open debt. PeriodLayout
+	// ("2006-01") sorts lexicographically the same as chronologically.
+	var open []models.EWAAdvance
+	if err := tx.Where(
+		"organization_id = ? AND employee_id = ? AND period <= ? AND status IN ?",
+		orgID, employeeID, period,
+		[]models.AdvanceStatus{models.AdvanceApproved, models.AdvanceDisbursed},
+	).Find(&open).Error; err != nil {
+		return 0, 0, 0, time.Time{}, err
+	}
+	for _, r := range open {
+		// RemainingKobo, not AmountKobo: a partially settled advance has
+		// already given up some of what it owed.
+		next, addErr := outstanding.Add(r.RemainingKobo())
+		if addErr != nil {
+			return 0, 0, 0, time.Time{}, fmt.Errorf("outstanding total overflow: %w", addErr)
+		}
+		outstanding = next
+
+		if r.Status == models.AdvanceDisbursed {
+			next, addErr := recoverable.Add(r.RemainingKobo())
+			if addErr != nil {
+				return 0, 0, 0, time.Time{}, fmt.Errorf("recoverable total overflow: %w", addErr)
+			}
+			recoverable = next
+		}
+	}
+	return outstanding, recoverable, drawCount, lastDrawAt, nil
 }
 
 // userIDForEmployee resolves the worker's app identity. The advance references

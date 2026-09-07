@@ -41,6 +41,14 @@ const (
 	// AccountFeeIncome — credit-normal. Zero in the fee-free model, present so a
 	// fee-charging deployment does not have to reshape the ledger.
 	AccountFeeIncome AccountType = "fee_income"
+
+	// AccountWriteOffExpense — org-level. Debit-normal: recognizes an
+	// outstanding advance as an unrecoverable loss when there is no more
+	// payroll to settle it against (a terminated employee). See
+	// WriteOffAdvance. Distinct from a cancellation: cash genuinely left the
+	// platform here, so the loss is booked, not reversed as if it never
+	// happened.
+	AccountWriteOffExpense AccountType = "write_off_expense"
 )
 
 // normalBalances maps each account type to its normal side.
@@ -50,6 +58,7 @@ var normalBalances = map[AccountType]Direction{
 	AccountWagePayable:       Credit,
 	AccountCashSettlement:    Credit,
 	AccountFeeIncome:         Credit,
+	AccountWriteOffExpense:   Debit,
 }
 
 var (

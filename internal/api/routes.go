@@ -83,6 +83,7 @@ func SetupRouter() *gin.Engine {
 			{
 				employees.POST("/", middleware.RequireRole("admin"), middleware.Idempotency(workers.RDB), empHandler.CreateEmployee)
 				employees.GET("/", empHandler.GetEmployees)
+				employees.POST("/:id/terminate", middleware.RequireRole("admin"), empHandler.TerminateEmployee)
 			}
 
 			payrolls := employer.Group("/payrolls")

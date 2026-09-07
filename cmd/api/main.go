@@ -5,13 +5,16 @@ import (
 	"go-payroll-engine/internal/api"
 	"go-payroll-engine/internal/api/middleware"
 	"go-payroll-engine/internal/config"
+	"go-payroll-engine/internal/integrations/monnify"
 	"go-payroll-engine/internal/models"
 	"go-payroll-engine/internal/services"
 	"go-payroll-engine/internal/workers"
+	"go-payroll-engine/pkg/money"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -61,6 +64,25 @@ func main() {
 		collector := services.NewAccrualSnapshotCollector()
 		if err := collector.Collect(context.Background(), time.Now()); err != nil {
 			log.Fatal("Accrual snapshot failed:", err)
+		}
+	case "reconcile":
+		// Wire this to a cron too — hourly or daily depending on how much
+		// drift is tolerable before it goes unnoticed. Threshold defaults to
+		// ₦1,000: tight enough to catch a real problem, loose enough that
+		// ordinary rounding across many orgs' balances doesn't page anyone.
+		thresholdKobo := money.FromNaira(1_000)
+		if raw := os.Getenv("RECONCILIATION_DRIFT_THRESHOLD_KOBO"); raw != "" {
+			if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil {
+				thresholdKobo = money.Kobo(parsed)
+			}
+		}
+		job := services.NewReconciliationJob(monnify.NewClient(), thresholdKobo)
+		run, err := job.Run(context.Background())
+		if err != nil {
+			log.Fatal("Reconciliation failed:", err)
+		}
+		if run.Alerted {
+			log.Printf("reconciliation ALERTED: drift=%v", *run.DriftKobo)
 		}
 	default:
 		startAPI(cfg.Port)

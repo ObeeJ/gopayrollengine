@@ -148,4 +148,17 @@ var (
 		Help:    "End-to-end EWA disbursement submission time, from task pickup to provider acceptance.",
 		Buckets: []float64{0.5, 1, 2, 5, 10, 30},
 	}, []string{"provider"})
+
+	// Reconciliation — answers "does the ledger's view of cash still match
+	// what the provider actually holds?" Drift here means either a bug or a
+	// transaction neither side recorded the same way.
+	ReconciliationDriftKobo = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "payroll_reconciliation_drift_kobo",
+		Help: "Signed drift between the wallet's balance change and the ledger's implied change since the last reconciliation run.",
+	})
+
+	ReconciliationAlertsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "payroll_reconciliation_alerts_total",
+		Help: "Reconciliation runs where drift exceeded the alert threshold.",
+	})
 )

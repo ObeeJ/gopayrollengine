@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"errors"
 	"go-payroll-engine/internal/api/middleware"
 	"go-payroll-engine/internal/models"
 	"go-payroll-engine/internal/repository"
+	"go-payroll-engine/internal/services"
 	"go-payroll-engine/internal/workers"
 	"go-payroll-engine/pkg/money"
 	"net/http"
@@ -15,12 +17,13 @@ import (
 )
 
 type EmployeeHandler struct {
-	repo repository.EmployeeRepository
+	repo        repository.EmployeeRepository
+	termination *services.EmployeeTerminationService
 }
 
 // NewEmployeeHandler — wires up the handler with its repository.
 func NewEmployeeHandler(r repository.EmployeeRepository) *EmployeeHandler {
-	return &EmployeeHandler{repo: r}
+	return &EmployeeHandler{repo: r, termination: services.NewEmployeeTerminationService()}
 }
 
 // CreateEmployee — admin-only; employee + consent + audit commit atomically, BVN reconciles out-of-band.
@@ -135,4 +138,33 @@ func (h *EmployeeHandler) GetEmployees(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"data": employees, "page": page, "page_size": pageSize, "total": total,
 	})
+}
+
+// TerminateEmployee — POST /api/v1/employees/:id/terminate. Deactivates the
+// employee and resolves every outstanding EWA advance: cancels any not yet
+// disbursed, writes off any that were — there is no further payroll run to
+// recover a disbursed advance from once employment has ended.
+func (h *EmployeeHandler) TerminateEmployee(c *gin.Context) {
+	var req struct {
+		Reason string `json:"reason" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	orgID := middleware.OrgID(c)
+	employeeID := c.Param("id")
+
+	emp, err := h.termination.Terminate(c.Request.Context(), orgID, employeeID, req.Reason, c.ClientIP())
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "employee not found"})
+			return
+		}
+		middleware.Logger.Error("employee termination failed", "org_id", orgID, "employee_id", employeeID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to terminate employee"})
+		return
+	}
+	c.JSON(http.StatusOK, emp)
 }

@@ -61,6 +61,53 @@ func CancelAdvance(tx *gorm.DB, adv *EWAAdvance, from AdvanceStatus, reason stri
 	return AppendAuditTx(tx, adv.OrganizationID, "EWAAdvance", adv.ID, "cancelled", string(from), reason, "internal", "")
 }
 
+// WriteOffAdvance recognizes a Disbursed advance as an unrecoverable loss —
+// the terminated-employee case, where there is no further payroll run to
+// settle it against. Unlike CancelAdvance, cash genuinely left the platform:
+// the reversal is Dr write_off_expense / Cr advance_receivable, which zeroes
+// the receivable and books the loss on an expense account, rather than
+// pretending — as CancelAdvance's mirror-image entries do — that the money
+// never moved.
+//
+// Only Disbursed advances are written off. An Approved-but-undisbursed
+// advance at termination time is cancelled instead (CancelAdvance): cash
+// never left, so there is nothing to recognize as a loss.
+func WriteOffAdvance(tx *gorm.DB, adv *EWAAdvance, reason string) error {
+	if err := TransitionAdvance(tx, adv, AdvanceDisbursed, AdvanceWrittenOff); err != nil {
+		return err
+	}
+	if err := tx.Model(&EWAAdvance{}).Where("id = ?", adv.ID).
+		Update("decline_reason", reason).Error; err != nil {
+		return err
+	}
+
+	receivable, err := EnsureAccount(tx, adv.OrganizationID, adv.EmployeeID, AccountAdvanceReceivable, money.NGN)
+	if err != nil {
+		return err
+	}
+	writeOff, err := EnsureAccount(tx, adv.OrganizationID, "", AccountWriteOffExpense, money.NGN)
+	if err != nil {
+		return err
+	}
+
+	if _, err := PostTransaction(tx, PostingRequest{
+		OrgID:          adv.OrganizationID,
+		Kind:           "ewa_write_off",
+		Reference:      adv.ID,
+		IdempotencyKey: "ewa_write_off:" + adv.ID,
+		Entries: []EntryInput{
+			{AccountID: writeOff.ID, Direction: Debit, Amount: money.NGNFromKobo(adv.AmountKobo)},
+			{AccountID: receivable.ID, Direction: Credit, Amount: money.NGNFromKobo(adv.AmountKobo)},
+		},
+	}); err != nil {
+		observability.LedgerImbalanceTotal.WithLabelValues(adv.OrganizationID).Inc()
+		return err
+	}
+
+	return AppendAuditTx(tx, adv.OrganizationID, "EWAAdvance", adv.ID, "written_off",
+		string(AdvanceDisbursed), reason, "internal", "")
+}
+
 // ErrAdvanceAlreadySubmitted is returned by MarkSubmittedToProvider when the
 // advance already carries a provider reference — the caller asked to submit
 // something that has already been sent.

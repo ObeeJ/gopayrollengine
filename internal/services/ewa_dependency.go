@@ -127,9 +127,16 @@ type DependencyAssessment struct {
 	Score   int                   `json:"score"`
 	Tier    models.DependencyTier `json:"tier"`
 	Signals map[string]int        `json:"signals"`
-	// Reasons are worker-facing explanations. They must read as observations,
-	// not accusations — this text is shown to the person it describes.
+	// Reasons are worker-facing explanations, populated only when a specific
+	// signal crosses its own threshold — see the per-signal comments below.
+	// They must read as observations, not accusations — this text is shown to
+	// the person it describes.
 	Reasons []string `json:"reasons,omitempty"`
+	// Nudge is a tier-appropriate message, always present for Elevated and
+	// above regardless of which individual signal (if any) crossed its
+	// Reasons threshold — see TierNudge. Empty for Healthy: normal use earns
+	// no message at all, not even a reassuring one.
+	Nudge string `json:"nudge,omitempty"`
 }
 
 // ScoreDependency computes the dependency assessment. Pure function.
@@ -155,6 +162,7 @@ func ScoreDependency(in DependencyInput) DependencyAssessment {
 		assessment.Signals["utilization"] = 0
 		assessment.Signals["escalation"] = 0
 		assessment.Signals["immediacy"] = 0
+		assessment.Nudge = TierNudge(assessment.Tier)
 		return assessment
 	}
 
@@ -260,7 +268,30 @@ func ScoreDependency(in DependencyInput) DependencyAssessment {
 		assessment.Score = 100
 	}
 	assessment.Tier = tierFor(assessment.Score)
+	assessment.Nudge = TierNudge(assessment.Tier)
 	return assessment
+}
+
+// TierNudge returns tier-appropriate worker-facing copy. Unlike Reasons —
+// each of which only fires when its own specific signal crosses its own
+// threshold, a threshold not always aligned with where that signal starts
+// contributing to the score (utilization's Reason fires at 0.30, but scoring
+// starts at 0.20) — Nudge is set from the final Tier alone, so a tier change
+// is never silent even when no individual Reasons threshold happened to fire
+// too. Closes the gap the roadmap flagged: "Elevated costs them nothing —
+// full access, plus the information." Same tone standard as Reasons:
+// observation, not accusation.
+func TierNudge(tier models.DependencyTier) string {
+	switch tier {
+	case models.TierElevated:
+		return "You've been accessing pay early a bit more than usual. This doesn't affect what you can draw — just something worth keeping an eye on."
+	case models.TierStrained:
+		return "Your early pay access has been climbing, so your limit is reduced for now to help protect your next payday. It eases back as the pattern does."
+	case models.TierDependent:
+		return "Most of your pay is being accessed before payday arrives. You still have access to an emergency amount — if it would help, ask your employer about other options."
+	default:
+		return ""
+	}
 }
 
 // tierFor maps a score onto its tier.

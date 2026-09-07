@@ -550,6 +550,87 @@ func TestSettleAdvancesForPayrollItem_OldestAdvanceRecoveredFirst(t *testing.T) 
 	assert.Equal(t, money.FromNaira(2_000), newerAfter.RemainingKobo())
 }
 
+// The defining case for multi-period advances: a draw made in one period
+// whose own payroll couldn't fully recover it must be picked up by a *later*
+// period's payroll run, however many periods later that turns out to be —
+// not left stranded once its own period's payroll has already happened.
+func TestSettleAdvancesForPayrollItem_CarriesRemainderIntoALaterPeriod(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	drawn := money.FromNaira(5_000)
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, drawn, "multi-period-1", "127.0.0.1")
+	require.NoError(t, err)
+	markDisbursed(t, orgID, advance.ID)
+
+	// The draw's own period runs payroll and can only partly cover it.
+	drawPeriod := time.Now().Format(PeriodLayout)
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		_, err := svc.SettleAdvancesForPayrollItem(tx, orgID, employeeID, drawPeriod, "ITEM-AUG", money.FromNaira(2_000))
+		return err
+	}))
+
+	var afterFirstRun models.EWAAdvance
+	require.NoError(t, models.DB.First(&afterFirstRun, "id = ?", advance.ID).Error)
+	require.Equal(t, models.AdvanceDisbursed, afterFirstRun.Status, "still owed after the first run")
+
+	// Two periods later — skipping a period entirely, same as "settle across
+	// September/October" — payroll runs again and finishes recovering it,
+	// even though this later period's own `period` filter doesn't match the
+	// advance's original Period column.
+	laterPeriod := time.Now().AddDate(0, 2, 0).Format(PeriodLayout)
+	var withheld money.Kobo
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		var err error
+		withheld, err = svc.SettleAdvancesForPayrollItem(tx, orgID, employeeID, laterPeriod, "ITEM-OCT", money.FromNaira(300_000))
+		return err
+	}))
+	assert.Equal(t, money.FromNaira(3_000), withheld, "the 3,000 left over from the first run")
+
+	var after models.EWAAdvance
+	require.NoError(t, models.DB.First(&after, "id = ?", advance.ID).Error)
+	assert.Equal(t, models.AdvanceSettled, after.Status)
+	assert.Equal(t, drawn, after.RecoveredKobo)
+	assert.Equal(t, money.Zero, after.RemainingKobo())
+	require.NotNil(t, after.SettledPayrollItemID)
+	assert.Equal(t, "ITEM-OCT", *after.SettledPayrollItemID)
+}
+
+// A worker's unresolved debt from an earlier period must keep reducing their
+// draw cap in a later period — the calendar turning over doesn't erase what
+// they still owe — while the per-period velocity guardrail (draws-this-period)
+// must NOT count a draw made in a different period.
+func TestOutstandingTx_PriorPeriodDebtReducesLaterPeriodCapButNotDrawCount(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	priorPeriod := time.Now().AddDate(0, -1, 0).Format(PeriodLayout)
+	leftover := models.EWAAdvance{
+		OrganizationID: orgID,
+		EmployeeID:     employeeID,
+		Period:         priorPeriod,
+		AmountKobo:     money.FromNaira(5_000),
+		RecoveredKobo:  money.FromNaira(2_000), // partially settled last period
+		Status:         models.AdvanceDisbursed,
+		DependencyTier: models.TierHealthy,
+		RequestedAt:    time.Now().AddDate(0, -1, 0),
+	}
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return tx.Create(&leftover).Error
+	}))
+
+	el, err := svc.GetEligibility(context.Background(), orgID, employeeID, time.Now())
+	require.NoError(t, err)
+
+	assert.GreaterOrEqual(t, int64(el.Outstanding), int64(money.FromNaira(3_000)),
+		"the 3,000 still owed from last period must count against this period's cap")
+	assert.Equal(t, 0, el.DrawsThisPeriod,
+		"a draw from a different period must not count against this period's velocity limit")
+}
+
 // setupRLSTestRole creates a NOSUPERUSER role the RLS assertions pivot into via
 // SET LOCAL ROLE. Without it the test connects as postgres — a superuser, which
 // bypasses RLS entirely, since FORCE applies to the table owner and not to

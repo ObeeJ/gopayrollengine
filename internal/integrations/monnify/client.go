@@ -214,3 +214,89 @@ func (c *Client) GetWalletBalance(walletNumber string) (money.Kobo, error) {
 
 	return money.FromNairaFloat(balanceResp.ResponseBody[0].WalletBalance), nil
 }
+
+// ReserveAccountRequest asks Monnify to mint a dedicated ("reserved") account
+// number that credits land in when a customer — here, an employer funding
+// their EWA pool — deposits into it.
+//
+// developers.monnify.com was unreachable from the environment this was built
+// in (egress-blocked), so this shape follows Monnify's long-documented
+// Reserved Accounts convention rather than a direct read of current docs —
+// the same limitation and the same resolution as the Paystack client
+// (internal/integrations/paystack/client.go).
+type ReserveAccountRequest struct {
+	AccountReference string `json:"accountReference"`
+	AccountName      string `json:"accountName"`
+	CurrencyCode     string `json:"currencyCode"`
+	ContractCode     string `json:"contractCode"`
+	CustomerEmail    string `json:"customerEmail"`
+	CustomerName     string `json:"customerName"`
+	// GetAllAvailableBanks requests one number per partner bank; the adapter
+	// only needs one, so this is left false and Monnify returns its default.
+	GetAllAvailableBanks bool `json:"getAllAvailableBanks"`
+}
+
+type reservedAccountDetail struct {
+	BankName      string `json:"bankName"`
+	BankCode      string `json:"bankCode"`
+	AccountNumber string `json:"accountNumber"`
+}
+
+type ReserveAccountResponse struct {
+	RequestSuccessful bool   `json:"requestSuccessful"`
+	ResponseMessage   string `json:"responseMessage"`
+	ResponseBody      struct {
+		AccountReference string                  `json:"accountReference"`
+		AccountName      string                  `json:"accountName"`
+		Accounts         []reservedAccountDetail `json:"accounts"`
+	} `json:"responseBody"`
+}
+
+// CreateReservedAccount provisions the dedicated account. Idempotent on
+// Monnify's side by AccountReference: calling this again for an org that
+// already has one returns the same account rather than minting a second.
+func (c *Client) CreateReservedAccount(req ReserveAccountRequest) (*ReserveAccountResponse, error) {
+	start := time.Now()
+	defer func() {
+		observability.MonnifyCallDuration.WithLabelValues("reserved_account").Observe(time.Since(start).Seconds())
+	}()
+
+	if c.MockMode {
+		observability.MonnifyCallsTotal.WithLabelValues("reserved_account", "true").Inc()
+		resp := &ReserveAccountResponse{RequestSuccessful: true, ResponseMessage: "Mock Account Created"}
+		resp.ResponseBody.AccountReference = req.AccountReference
+		resp.ResponseBody.AccountName = req.AccountName
+		resp.ResponseBody.Accounts = []reservedAccountDetail{
+			{BankName: "Mock Bank", BankCode: "000", AccountNumber: "0000000000"},
+		}
+		return resp, nil
+	}
+	if err := c.Authenticate(); err != nil {
+		observability.MonnifyCallsTotal.WithLabelValues("reserved_account", "false").Inc()
+		return nil, err
+	}
+
+	body, _ := json.Marshal(req)
+	httpReq, _ := http.NewRequest("POST", c.Config.BaseURL+"/api/v2/bank-transfer/reserved-accounts", bytes.NewBuffer(body))
+	httpReq.Header.Set("Authorization", "Bearer "+c.AccessToken)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		observability.MonnifyCallsTotal.WithLabelValues("reserved_account", "false").Inc()
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var accResp ReserveAccountResponse
+	if err := json.NewDecoder(resp.Body).Decode(&accResp); err != nil {
+		observability.MonnifyCallsTotal.WithLabelValues("reserved_account", "false").Inc()
+		return nil, fmt.Errorf("monnify reserved account response decode failed: %w", err)
+	}
+	success := "true"
+	if !accResp.RequestSuccessful {
+		success = "false"
+	}
+	observability.MonnifyCallsTotal.WithLabelValues("reserved_account", success).Inc()
+	return &accResp, nil
+}

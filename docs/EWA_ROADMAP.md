@@ -274,11 +274,17 @@ Ledger, accrual, eligibility, guardrails, settlement, tenant isolation.
 
 ### Phase 2 — Make it real
 
-- Disbursement execution: EWA draws currently post to the ledger but are not yet
-  wired to an actual Monnify transfer. **This is the gap between "records an
-  advance" and "moves money" and must be closed before any pilot.**
-- Idempotent disbursement with the same reference discipline as payroll
-- Funding pool balance checks before approval
+- ~~Disbursement execution: EWA draws currently post to the ledger but are not
+  yet wired to an actual Monnify transfer.~~ — done: provider abstraction
+  (Monnify + Paystack) with idempotent disbursement and webhook confirmation.
+- ~~Funding pool balance checks before approval~~ — done: `organization_funding_accounts`
+  (migration 000019) gives each org a dedicated deposit account; a deposit
+  credits `employer_funding` and offsets `cash_settlement`, and
+  `ewa_policies.require_funding_coverage` (opt-in, off by default) blocks a
+  draw that would push the org's exposure past what it has funded. Still
+  open: no reconciliation job cross-checking the ledger against the
+  provider's own statement of the account (Phase 3's reconciliation item
+  covers payroll disbursement the same way and should absorb this too).
 - Worker-facing nudge content for the elevated tier
 - Accrual snapshot cron (`ewa_accrual_snapshots` is defined but not yet populated)
 - Admin API for policy configuration

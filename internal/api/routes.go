@@ -53,6 +53,7 @@ func SetupRouter() *gin.Engine {
 	webhookHandler := &handlers.WebhookHandler{}
 	consentHandler := &handlers.ConsentHandler{}
 	complianceHandler := &handlers.ComplianceHandler{}
+	dashboardHandler := handlers.NewDashboardHandler(services.NewEmployerDashboardService(empRepo))
 
 	v1 := r.Group("/api/v1")
 	{
@@ -95,6 +96,7 @@ func SetupRouter() *gin.Engine {
 			analytics := employer.Group("/analytics")
 			{
 				analytics.GET("/predictive", analyticsHandler.GetPredictiveAnalytics)
+				analytics.GET("/workforce-dependency", dashboardHandler.GetWorkforceDependency)
 			}
 
 			consent := employer.Group("/consent")

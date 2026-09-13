@@ -818,6 +818,38 @@ func (s *EWAService) policyTx(tx *gorm.DB, orgID string) (*models.EWAPolicy, err
 	return &def, nil
 }
 
+// currentDependencyTierTx computes a single employee's current dependency
+// tier from their draw history, independent of whether a draw is currently
+// possible for them (policy.Enabled, IsActive, salary-on-file). Aggregate
+// workforce-stress reporting answers a different question than draw
+// eligibility does, and must not go blank just because an unrelated gate
+// happens to be closed — an org that has since disabled EWA, say, still had
+// a real draw history worth reporting on.
+func (s *EWAService) currentDependencyTierTx(
+	tx *gorm.DB, orgID, employeeID string, emp *models.Employee, asOf time.Time,
+) (models.DependencyTier, error) {
+	monthlySalary := emp.Salary
+	if emp.IsHourly() {
+		basis, err := s.hourlyMonthlyEarningsBasisTx(tx, orgID, employeeID, emp.HourlyRateKobo, asOf)
+		if err != nil {
+			return "", err
+		}
+		monthlySalary = basis
+	}
+
+	history, err := s.drawHistoryTx(tx, orgID, employeeID, asOf)
+	if err != nil {
+		return "", err
+	}
+	assessment := ScoreDependency(DependencyInput{
+		Now:           asOf,
+		Draws:         history,
+		MonthlySalary: monthlySalary,
+		LastPayday:    lastPayday(asOf),
+	})
+	return assessment.Tier, nil
+}
+
 // drawHistoryTx loads advances inside the dependency window.
 func (s *EWAService) drawHistoryTx(tx *gorm.DB, orgID, employeeID string, asOf time.Time) ([]DrawEvent, error) {
 	var rows []models.EWAAdvance

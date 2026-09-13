@@ -260,3 +260,81 @@ func (h *AdvanceHandler) GetAdvanceHistory(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"data": advances, "total": len(advances)})
 }
+
+// AddBill — POST /api/v1/worker/bills. Records a recurring bill so the
+// product can name a payday/due-date timing mismatch explicitly.
+func (h *AdvanceHandler) AddBill(c *gin.Context) {
+	var req struct {
+		Name   string     `json:"name"`
+		Amount money.Kobo `json:"amount"`
+		DueDay int        `json:"due_day"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	employeeID := middleware.EmployeeID(c)
+	orgID := middleware.OrgID(c)
+
+	bill, err := h.ewa.AddBill(c.Request.Context(), orgID, employeeID, req.Name, req.Amount, req.DueDay)
+	if err != nil {
+		if errors.Is(err, services.ErrInvalidBill) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		middleware.Logger.Error("add bill failed", "org_id", orgID, "employee_id", employeeID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to add bill"})
+		return
+	}
+	c.JSON(http.StatusCreated, bill)
+}
+
+// GetBills — GET /api/v1/worker/bills; the worker's own recorded bills.
+func (h *AdvanceHandler) GetBills(c *gin.Context) {
+	employeeID := middleware.EmployeeID(c)
+	orgID := middleware.OrgID(c)
+
+	bills, err := h.ewa.ListBills(c.Request.Context(), orgID, employeeID)
+	if err != nil {
+		middleware.Logger.Error("list bills failed", "org_id", orgID, "employee_id", employeeID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load bills"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": bills, "total": len(bills)})
+}
+
+// RemoveBill — DELETE /api/v1/worker/bills/:id.
+func (h *AdvanceHandler) RemoveBill(c *gin.Context) {
+	employeeID := middleware.EmployeeID(c)
+	orgID := middleware.OrgID(c)
+	billID := c.Param("id")
+
+	if err := h.ewa.RemoveBill(c.Request.Context(), orgID, employeeID, billID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "bill not found"})
+			return
+		}
+		middleware.Logger.Error("remove bill failed", "org_id", orgID, "employee_id", employeeID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to remove bill"})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// GetBillTiming — GET /api/v1/worker/bill-timing. Lays the worker's
+// recorded bills out against their next payday, flagging which fall before
+// it — a timing mismatch, not necessarily a shortfall — and which of those
+// their currently available EWA draw could actually close.
+func (h *AdvanceHandler) GetBillTiming(c *gin.Context) {
+	employeeID := middleware.EmployeeID(c)
+	orgID := middleware.OrgID(c)
+
+	plan, err := h.ewa.GetBillTimingPlan(c.Request.Context(), orgID, employeeID, time.Now())
+	if err != nil {
+		middleware.Logger.Error("bill timing plan failed", "org_id", orgID, "employee_id", employeeID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build bill timing plan"})
+		return
+	}
+	c.JSON(http.StatusOK, plan)
+}

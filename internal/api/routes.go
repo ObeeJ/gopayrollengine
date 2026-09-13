@@ -146,6 +146,10 @@ func SetupRouter() *gin.Engine {
 			worker.POST("/protected-payday", advanceHandler.SetProtectedPayday)
 			worker.GET("/savings", advanceHandler.GetSavings)
 			worker.POST("/savings", advanceHandler.SetSavingsPreference)
+			worker.GET("/bills", advanceHandler.GetBills)
+			worker.POST("/bills", advanceHandler.AddBill)
+			worker.DELETE("/bills/:id", advanceHandler.RemoveBill)
+			worker.GET("/bill-timing", advanceHandler.GetBillTiming)
 			worker.POST("/time-entries", timeEntryHandler.SubmitTimeEntry)
 			worker.GET("/time-entries", timeEntryHandler.GetTimeEntries)
 		}

@@ -288,3 +288,34 @@ type EWASavingsPreference struct {
 }
 
 func (EWASavingsPreference) TableName() string { return "ewa_savings_preferences" }
+
+// EWABill — a worker's recorded recurring bill. Lets the product name a
+// timing mismatch explicitly (a bill due before payday, when the wages to
+// cover it are already earned but not yet paid) instead of treating every
+// early draw as a shortfall.
+type EWABill struct {
+	ID             string `gorm:"primaryKey" json:"id"`
+	OrganizationID string `gorm:"index;not null" json:"organization_id"`
+	EmployeeID     string `gorm:"index;not null" json:"employee_id"`
+
+	Name       string     `gorm:"not null" json:"name"`
+	AmountKobo money.Kobo `gorm:"column:amount_kobo;type:bigint;not null" json:"amount_kobo"`
+	// DueDay — day of the month, 1-31. Resolved against each month's actual
+	// length at query time (day 31 in a 30-day month means that month's
+	// last day), never stored differently per month.
+	DueDay int  `gorm:"column:due_day;not null" json:"due_day"`
+	Active bool `gorm:"default:true" json:"active"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (EWABill) TableName() string { return "ewa_bills" }
+
+// BeforeCreate — BILL- prefix, consistent with the rest of the ID namespace.
+func (b *EWABill) BeforeCreate(tx *gorm.DB) error {
+	if b.ID == "" {
+		b.ID = "BILL-" + uuid.New().String()[:8]
+	}
+	return nil
+}

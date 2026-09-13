@@ -302,6 +302,7 @@ func (s *EWAService) eligibilityTx(tx *gorm.DB, orgID, employeeID string, asOf t
 		MonthlySalary: el.MonthlySalary,
 		LastPayday:    lastPayday(asOf),
 	})
+	el.Dependency.CounsellingReferral = TierCounsellingReferral(el.Dependency.Tier, *policy)
 
 	el.TierCap = TierCap(el.Dependency.Tier, policyCap, *policy)
 

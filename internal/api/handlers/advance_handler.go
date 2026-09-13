@@ -68,11 +68,12 @@ func (h *AdvanceHandler) GetEarnedWages(c *gin.Context) {
 		"projected_payday_if_max_drawn": el.ProjectedPaydayIfMaxDrawn,
 		"protected_payday":              el.ProtectedPayday,
 		"wellbeing": gin.H{
-			"tier":    el.Dependency.Tier,
-			"score":   el.Dependency.Score,
-			"signals": el.Dependency.Signals,
-			"notes":   el.Dependency.Reasons,
-			"nudge":   el.Dependency.Nudge,
+			"tier":                 el.Dependency.Tier,
+			"score":                el.Dependency.Score,
+			"signals":              el.Dependency.Signals,
+			"notes":                el.Dependency.Reasons,
+			"nudge":                el.Dependency.Nudge,
+			"counselling_referral": el.Dependency.CounsellingReferral,
 		},
 	})
 }
@@ -116,9 +117,10 @@ func (h *AdvanceHandler) RequestAdvance(c *gin.Context) {
 			body["minimum_draw"] = el.MinimumDraw
 			body["next_eligible_at"] = el.NextEligibleAt
 			body["wellbeing"] = gin.H{
-				"tier":  el.Dependency.Tier,
-				"notes": el.Dependency.Reasons,
-				"nudge": el.Dependency.Nudge,
+				"tier":                 el.Dependency.Tier,
+				"notes":                el.Dependency.Reasons,
+				"nudge":                el.Dependency.Nudge,
+				"counselling_referral": el.Dependency.CounsellingReferral,
 			}
 		}
 		c.JSON(http.StatusUnprocessableEntity, body)

@@ -36,6 +36,12 @@ type PolicyUpdate struct {
 	CoolingOffHours        *int
 	EmergencyFloorKobo     *money.Kobo
 	RequireFundingCoverage *bool
+
+	// CounsellingResourceName / CounsellingContact — the employer's own
+	// financial counselling resource, surfaced at the Strained tier and
+	// above. Either may be set to an empty string to clear it.
+	CounsellingResourceName *string
+	CounsellingContact      *string
 }
 
 // GetPolicy returns the org's EWAPolicy — the default, unmodified, if the
@@ -107,6 +113,12 @@ func (s *EWAService) UpdatePolicy(ctx context.Context, orgID string, upd PolicyU
 		}
 		if upd.RequireFundingCoverage != nil {
 			current.RequireFundingCoverage = *upd.RequireFundingCoverage
+		}
+		if upd.CounsellingResourceName != nil {
+			current.CounsellingResourceName = *upd.CounsellingResourceName
+		}
+		if upd.CounsellingContact != nil {
+			current.CounsellingContact = *upd.CounsellingContact
 		}
 
 		// Upsert on organization_id (the primary key): policyTx hands back an

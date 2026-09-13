@@ -43,14 +43,16 @@ func (h *PolicyHandler) GetPolicy(c *gin.Context) {
 // raw constraint violation.
 func (h *PolicyHandler) UpdatePolicy(c *gin.Context) {
 	var req struct {
-		Enabled                *bool       `json:"enabled"`
-		MaxAccrualPct          *int        `json:"max_accrual_pct"`
-		AbsoluteCapKobo        *money.Kobo `json:"absolute_cap_kobo"`
-		MinDrawKobo            *money.Kobo `json:"min_draw_kobo"`
-		MaxDrawsPerPeriod      *int        `json:"max_draws_per_period"`
-		CoolingOffHours        *int        `json:"cooling_off_hours"`
-		EmergencyFloorKobo     *money.Kobo `json:"emergency_floor_kobo"`
-		RequireFundingCoverage *bool       `json:"require_funding_coverage"`
+		Enabled                 *bool       `json:"enabled"`
+		MaxAccrualPct           *int        `json:"max_accrual_pct"`
+		AbsoluteCapKobo         *money.Kobo `json:"absolute_cap_kobo"`
+		MinDrawKobo             *money.Kobo `json:"min_draw_kobo"`
+		MaxDrawsPerPeriod       *int        `json:"max_draws_per_period"`
+		CoolingOffHours         *int        `json:"cooling_off_hours"`
+		EmergencyFloorKobo      *money.Kobo `json:"emergency_floor_kobo"`
+		RequireFundingCoverage  *bool       `json:"require_funding_coverage"`
+		CounsellingResourceName *string     `json:"counselling_resource_name"`
+		CounsellingContact      *string     `json:"counselling_contact"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -59,14 +61,16 @@ func (h *PolicyHandler) UpdatePolicy(c *gin.Context) {
 
 	orgID := middleware.OrgID(c)
 	policy, err := h.ewa.UpdatePolicy(c.Request.Context(), orgID, services.PolicyUpdate{
-		Enabled:                req.Enabled,
-		MaxAccrualPct:          req.MaxAccrualPct,
-		AbsoluteCapKobo:        req.AbsoluteCapKobo,
-		MinDrawKobo:            req.MinDrawKobo,
-		MaxDrawsPerPeriod:      req.MaxDrawsPerPeriod,
-		CoolingOffHours:        req.CoolingOffHours,
-		EmergencyFloorKobo:     req.EmergencyFloorKobo,
-		RequireFundingCoverage: req.RequireFundingCoverage,
+		Enabled:                 req.Enabled,
+		MaxAccrualPct:           req.MaxAccrualPct,
+		AbsoluteCapKobo:         req.AbsoluteCapKobo,
+		MinDrawKobo:             req.MinDrawKobo,
+		MaxDrawsPerPeriod:       req.MaxDrawsPerPeriod,
+		CoolingOffHours:         req.CoolingOffHours,
+		EmergencyFloorKobo:      req.EmergencyFloorKobo,
+		RequireFundingCoverage:  req.RequireFundingCoverage,
+		CounsellingResourceName: req.CounsellingResourceName,
+		CounsellingContact:      req.CounsellingContact,
 	}, c.ClientIP())
 	if err != nil {
 		if errors.Is(err, services.ErrInvalidPolicyValue) {

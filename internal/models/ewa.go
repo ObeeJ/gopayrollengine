@@ -327,3 +327,34 @@ func (b *EWABill) BeforeCreate(tx *gorm.DB) error {
 	}
 	return nil
 }
+
+// EWAHardshipGrant — a genuine alternative to a fourth advance: discretionary
+// employer money issued to a worker outright, never recovered from a future
+// payroll run. Recorded here as a decision an admin actually made, the same
+// reason employee termination and payroll creation are admin-only actions.
+type EWAHardshipGrant struct {
+	ID             string `gorm:"primaryKey" json:"id"`
+	OrganizationID string `gorm:"index;not null" json:"organization_id"`
+	EmployeeID     string `gorm:"index;not null" json:"employee_id"`
+
+	AmountKobo   money.Kobo `gorm:"column:amount_kobo;type:bigint;not null" json:"amount_kobo"`
+	Reason       string     `gorm:"not null" json:"reason"`
+	ApprovedByIP string     `gorm:"column:approved_by_ip;not null" json:"-"`
+
+	DisbursedAt time.Time `json:"disbursed_at"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+func (EWAHardshipGrant) TableName() string { return "ewa_hardship_grants" }
+
+// BeforeCreate — GRANT- prefix, consistent with the rest of the ID namespace.
+func (g *EWAHardshipGrant) BeforeCreate(tx *gorm.DB) error {
+	if g.ID == "" {
+		g.ID = "GRANT-" + uuid.New().String()[:8]
+	}
+	if g.DisbursedAt.IsZero() {
+		g.DisbursedAt = time.Now()
+	}
+	return nil
+}

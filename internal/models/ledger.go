@@ -58,17 +58,24 @@ const (
 	// assumed gross, this account's balance is the worker's real running
 	// savings total.
 	AccountEmployeeSavings AccountType = "employee_savings"
+
+	// AccountHardshipGrantExpense — org-level. Debit-normal: a hardship grant
+	// is recognized as an immediate, permanent expense the moment it's
+	// issued, never a receivable — unlike an advance, it is never recovered
+	// from a future payroll run. See EWAService.IssueHardshipGrant.
+	AccountHardshipGrantExpense AccountType = "hardship_grant_expense"
 )
 
 // normalBalances maps each account type to its normal side.
 var normalBalances = map[AccountType]Direction{
-	AccountEmployerFunding:   Credit,
-	AccountAdvanceReceivable: Debit,
-	AccountWagePayable:       Credit,
-	AccountCashSettlement:    Credit,
-	AccountFeeIncome:         Credit,
-	AccountWriteOffExpense:   Debit,
-	AccountEmployeeSavings:   Credit,
+	AccountEmployerFunding:      Credit,
+	AccountAdvanceReceivable:    Debit,
+	AccountWagePayable:          Credit,
+	AccountCashSettlement:       Credit,
+	AccountFeeIncome:            Credit,
+	AccountWriteOffExpense:      Debit,
+	AccountEmployeeSavings:      Credit,
+	AccountHardshipGrantExpense: Debit,
 }
 
 var (

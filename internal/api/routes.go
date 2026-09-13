@@ -42,10 +42,10 @@ func SetupRouter() *gin.Engine {
 	// Handlers — dependencies injected, no handler touches models.DB directly.
 	authHandler := &handlers.AuthHandler{OrgRepo: orgRepo}
 	workerAuthHandler := handlers.NewWorkerAuthHandler(userRepo, empRepo)
-	empHandler := handlers.NewEmployeeHandler(empRepo)
+	ewaService := services.NewEWAService()
+	empHandler := handlers.NewEmployeeHandler(empRepo, ewaService)
 	payrollHandler := &handlers.PayrollHandler{Service: services.NewPayrollService(payrollRepo, empRepo)}
 	analyticsHandler := &handlers.AnalyticsHandler{Service: services.NewAnalyticsService(payrollRepo, empRepo)}
-	ewaService := services.NewEWAService()
 	advanceHandler := handlers.NewAdvanceHandler(ewaService)
 	policyHandler := handlers.NewPolicyHandler(ewaService)
 	timeEntryHandler := handlers.NewTimeEntryHandler(services.NewTimeEntryService())
@@ -85,6 +85,8 @@ func SetupRouter() *gin.Engine {
 				employees.POST("/", middleware.RequireRole("admin"), middleware.Idempotency(workers.RDB), empHandler.CreateEmployee)
 				employees.GET("/", empHandler.GetEmployees)
 				employees.POST("/:id/terminate", middleware.RequireRole("admin"), empHandler.TerminateEmployee)
+				employees.POST("/:id/hardship-grants", middleware.RequireRole("admin"), empHandler.IssueHardshipGrant)
+				employees.GET("/:id/hardship-grants", empHandler.GetHardshipGrants)
 			}
 
 			payrolls := employer.Group("/payrolls")

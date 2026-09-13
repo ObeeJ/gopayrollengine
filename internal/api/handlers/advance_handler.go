@@ -46,20 +46,21 @@ func (h *AdvanceHandler) GetEarnedWages(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"employee_id":      el.EmployeeID,
-		"period":           el.Period,
-		"monthly_salary":   el.MonthlySalary,
-		"earned_to_date":   el.AccruedToDate,
-		"max_advance":      el.Available,
-		"policy_cap":       el.PolicyCap,
-		"tier_cap":         el.TierCap,
-		"outstanding":      el.Outstanding,
-		"minimum_draw":     el.MinimumDraw,
-		"draws_this_month": el.DrawsThisPeriod,
-		"max_draws":        el.MaxDraws,
-		"next_eligible_at": el.NextEligibleAt,
-		"blocked":          el.Blocked,
-		"blocked_reason":   el.BlockedReason,
+		"employee_id":              el.EmployeeID,
+		"period":                   el.Period,
+		"monthly_salary":           el.MonthlySalary,
+		"earned_to_date":           el.AccruedToDate,
+		"max_advance":              el.Available,
+		"policy_cap":               el.PolicyCap,
+		"tier_cap":                 el.TierCap,
+		"outstanding":              el.Outstanding,
+		"minimum_draw":             el.MinimumDraw,
+		"draws_this_month":         el.DrawsThisPeriod,
+		"max_draws":                el.MaxDraws,
+		"next_eligible_at":         el.NextEligibleAt,
+		"blocked":                  el.Blocked,
+		"blocked_reason":           el.BlockedReason,
+		"hardship_grant_suggested": el.HardshipGrantSuggested,
 		// The consequence next to the offer, not a surprise on payday: UK user
 		// research finds people grasp "money available now" but are caught off
 		// guard by a smaller paycheck. protected_payday is the worker's own floor
@@ -116,6 +117,7 @@ func (h *AdvanceHandler) RequestAdvance(c *gin.Context) {
 			body["available"] = el.Available
 			body["minimum_draw"] = el.MinimumDraw
 			body["next_eligible_at"] = el.NextEligibleAt
+			body["hardship_grant_suggested"] = el.HardshipGrantSuggested
 			body["wellbeing"] = gin.H{
 				"tier":                 el.Dependency.Tier,
 				"notes":                el.Dependency.Reasons,

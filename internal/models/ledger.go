@@ -49,6 +49,15 @@ const (
 	// platform here, so the loss is booked, not reversed as if it never
 	// happened.
 	AccountWriteOffExpense AccountType = "write_off_expense"
+
+	// AccountEmployeeSavings — per-worker. Credit-normal: a positive balance
+	// is money diverted from the worker's own net pay at their request
+	// (round-up or fixed-share automated savings) rather than paid out to
+	// their bank account. Money genuinely stayed inside the platform here —
+	// unlike AccountWagePayable, which is only ever debited down from an
+	// assumed gross, this account's balance is the worker's real running
+	// savings total.
+	AccountEmployeeSavings AccountType = "employee_savings"
 )
 
 // normalBalances maps each account type to its normal side.
@@ -59,6 +68,7 @@ var normalBalances = map[AccountType]Direction{
 	AccountCashSettlement:    Credit,
 	AccountFeeIncome:         Credit,
 	AccountWriteOffExpense:   Debit,
+	AccountEmployeeSavings:   Credit,
 }
 
 var (

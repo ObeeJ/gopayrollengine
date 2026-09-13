@@ -109,6 +109,24 @@ func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string
 						"employee %s: advances (%s) exceed gross pay (%s) — refusing to build a negative payroll item",
 						emp.ID, withheld, gross)
 				}
+			}
+
+			// Automated savings (worker opt-in, Phase 4 roadmap item) diverts
+			// from whatever is left after EWA settlement, never from gross —
+			// the worker's own election should never compete with recovering
+			// an advance they already drew against this same pay.
+			diverted, err := s.ewa.DivertSavingsForPayrollItem(tx, orgID, emp.ID, item.ID, net)
+			if err != nil {
+				return fmt.Errorf("savings diversion for %s failed: %w", emp.ID, err)
+			}
+			if diverted.IsPositive() {
+				net, err = net.Sub(diverted)
+				if err != nil {
+					return fmt.Errorf("net pay computation for %s failed: %w", emp.ID, err)
+				}
+			}
+
+			if withheld.IsPositive() || diverted.IsPositive() {
 				if err := tx.Model(&models.PayrollItem{}).
 					Where("id = ?", item.ID).
 					Update("amount", net).Error; err != nil {

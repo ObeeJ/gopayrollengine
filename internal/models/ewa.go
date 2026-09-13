@@ -252,3 +252,39 @@ func (EWAWorkerPreference) TableName() string { return "ewa_worker_preferences" 
 func (p EWAWorkerPreference) ProtectedPayday() money.Kobo {
 	return money.Kobo(p.ProtectedPaydayMinor)
 }
+
+// SavingsMode — how much of net pay automated savings diverts each run.
+type SavingsMode string
+
+const (
+	// SavingsFixedPercent diverts a flat share of net pay every run.
+	SavingsFixedPercent SavingsMode = "fixed_percent"
+	// SavingsRoundUp diverts only the "spare change" above the nearest
+	// RoundUpToKobo unit — a run that already lands on the unit saves
+	// nothing, by design.
+	SavingsRoundUp SavingsMode = "round_up"
+)
+
+// EWASavingsPreference — a worker's automated-savings election. Opt-in and
+// worker-controlled, the same way EWAWorkerPreference's protected-payday
+// floor is: the system diverts money at their instruction, never on its own
+// judgement about what they should be saving.
+type EWASavingsPreference struct {
+	OrganizationID string `gorm:"primaryKey" json:"organization_id"`
+	EmployeeID     string `gorm:"primaryKey" json:"employee_id"`
+
+	Enabled bool        `gorm:"default:false" json:"enabled"`
+	Mode    SavingsMode `gorm:"default:fixed_percent" json:"mode"`
+
+	// FixedPercent — whole percentage points of net pay, FixedPercent mode only.
+	FixedPercent int `gorm:"default:0" json:"fixed_percent"`
+	// RoundUpToKobo — the round-up unit, RoundUp mode only. Zero means
+	// unconfigured: round-up mode with this at zero diverts nothing rather
+	// than dividing by zero.
+	RoundUpToKobo money.Kobo `gorm:"column:round_up_to_kobo;type:bigint;default:0" json:"round_up_to_kobo"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (EWASavingsPreference) TableName() string { return "ewa_savings_preferences" }

@@ -178,6 +178,69 @@ func (h *AdvanceHandler) SetProtectedPayday(c *gin.Context) {
 	})
 }
 
+// SetSavingsPreference — POST /api/v1/worker/savings.
+//
+// Lets a worker opt into automated savings: a fixed share of net pay, or the
+// round-up "spare change" above a chosen unit, diverted every payroll run.
+// Opt-in and worker-controlled, exactly like the protected-payday floor.
+func (h *AdvanceHandler) SetSavingsPreference(c *gin.Context) {
+	var req struct {
+		Enabled bool               `json:"enabled"`
+		Mode    models.SavingsMode `json:"mode"`
+		Amount  int64              `json:"amount"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	employeeID := middleware.EmployeeID(c)
+	orgID := middleware.OrgID(c)
+
+	pref, err := h.ewa.SetSavingsPreference(c.Request.Context(), orgID, employeeID, services.SavingsPreferenceUpdate{
+		Enabled: req.Enabled, Mode: req.Mode, Amount: req.Amount,
+	})
+	if err != nil {
+		if errors.Is(err, services.ErrInvalidSavingsPreference) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		middleware.Logger.Error("set savings preference failed",
+			"org_id", orgID, "employee_id", employeeID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update savings preference"})
+		return
+	}
+
+	c.JSON(http.StatusOK, pref)
+}
+
+// GetSavings — GET /api/v1/worker/savings; the worker's current election
+// plus their running savings balance.
+func (h *AdvanceHandler) GetSavings(c *gin.Context) {
+	employeeID := middleware.EmployeeID(c)
+	orgID := middleware.OrgID(c)
+
+	pref, err := h.ewa.GetSavingsPreference(c.Request.Context(), orgID, employeeID)
+	if err != nil {
+		middleware.Logger.Error("get savings preference failed",
+			"org_id", orgID, "employee_id", employeeID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load savings preference"})
+		return
+	}
+	balance, err := h.ewa.GetSavingsBalance(c.Request.Context(), orgID, employeeID)
+	if err != nil {
+		middleware.Logger.Error("get savings balance failed",
+			"org_id", orgID, "employee_id", employeeID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load savings balance"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"preference": pref,
+		"balance":    balance,
+	})
+}
+
 // GetAdvanceHistory — GET /api/v1/worker/advances; worker's own history, RLS-fenced.
 func (h *AdvanceHandler) GetAdvanceHistory(c *gin.Context) {
 	employeeID := middleware.EmployeeID(c)

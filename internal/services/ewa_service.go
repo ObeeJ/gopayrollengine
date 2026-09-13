@@ -187,6 +187,13 @@ type Eligibility struct {
 	// Available is still above MinimumDraw (so Blocked is false) but below
 	// the specific amount requested — see the decision switch there.
 	FundingBound bool `json:"-"`
+
+	// HardshipGrantSuggested is set when this period's draw limit has been
+	// reached while the worker is already Strained or Dependent — exactly
+	// the moment a fourth advance helps least, since it recovers from a
+	// payday already spoken for. It does not offer a grant on its own; an
+	// admin still has to decide (see EWAService.IssueHardshipGrant).
+	HardshipGrantSuggested bool `json:"hardship_grant_suggested,omitempty"`
 }
 
 // GetEligibility computes what a worker may draw right now, and why.
@@ -386,6 +393,9 @@ func (s *EWAService) eligibilityTx(tx *gorm.DB, orgID, employeeID string, asOf t
 		el.Blocked, el.BlockedReason = true, DeclineDrawLimit
 		next := firstOfNextPeriod(asOf)
 		el.NextEligibleAt = &next
+		if el.Dependency.Tier == models.TierStrained || el.Dependency.Tier == models.TierDependent {
+			el.HardshipGrantSuggested = true
+		}
 		return el, nil
 	}
 	if !lastDrawAt.IsZero() {

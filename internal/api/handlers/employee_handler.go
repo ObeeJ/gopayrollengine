@@ -19,11 +19,12 @@ import (
 type EmployeeHandler struct {
 	repo        repository.EmployeeRepository
 	termination *services.EmployeeTerminationService
+	ewa         *services.EWAService
 }
 
 // NewEmployeeHandler — wires up the handler with its repository.
-func NewEmployeeHandler(r repository.EmployeeRepository) *EmployeeHandler {
-	return &EmployeeHandler{repo: r, termination: services.NewEmployeeTerminationService()}
+func NewEmployeeHandler(r repository.EmployeeRepository, ewa *services.EWAService) *EmployeeHandler {
+	return &EmployeeHandler{repo: r, termination: services.NewEmployeeTerminationService(), ewa: ewa}
 }
 
 // CreateEmployee — admin-only; employee + consent + audit commit atomically, BVN reconciles out-of-band.
@@ -167,4 +168,53 @@ func (h *EmployeeHandler) TerminateEmployee(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, emp)
+}
+
+// IssueHardshipGrant — POST /api/v1/employees/:id/hardship-grants. Admin-only:
+// discretionary employer money, so a human has to decide — a genuine
+// alternative to a fourth advance rather than another draw against wages.
+func (h *EmployeeHandler) IssueHardshipGrant(c *gin.Context) {
+	var req struct {
+		Amount money.Kobo `json:"amount" binding:"required"`
+		Reason string     `json:"reason" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	orgID := middleware.OrgID(c)
+	employeeID := c.Param("id")
+
+	grant, err := h.ewa.IssueHardshipGrant(c.Request.Context(), orgID, employeeID, req.Amount, req.Reason, c.ClientIP())
+	if err != nil {
+		if errors.Is(err, services.ErrInvalidHardshipGrant) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, services.ErrHardshipGrantPoolExhausted) {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+			return
+		}
+		middleware.Logger.Error("hardship grant failed", "org_id", orgID, "employee_id", employeeID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to issue hardship grant"})
+		return
+	}
+	c.JSON(http.StatusCreated, grant)
+}
+
+// GetHardshipGrants — GET /api/v1/employees/:id/hardship-grants; any
+// employer role may view the history, same read/write split as the policy
+// and timesheet endpoints.
+func (h *EmployeeHandler) GetHardshipGrants(c *gin.Context) {
+	orgID := middleware.OrgID(c)
+	employeeID := c.Param("id")
+
+	grants, err := h.ewa.ListHardshipGrants(c.Request.Context(), orgID, employeeID)
+	if err != nil {
+		middleware.Logger.Error("hardship grant list failed", "org_id", orgID, "employee_id", employeeID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load hardship grants"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": grants, "total": len(grants)})
 }

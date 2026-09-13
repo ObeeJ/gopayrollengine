@@ -137,6 +137,45 @@ type DependencyAssessment struct {
 	// Reasons threshold — see TierNudge. Empty for Healthy: normal use earns
 	// no message at all, not even a reassuring one.
 	Nudge string `json:"nudge,omitempty"`
+	// CounsellingReferral is set for Strained and Dependent — computed
+	// separately from ScoreDependency (see TierCounsellingReferral) since it
+	// depends on the org's own policy configuration, not on draw history.
+	// ScoreDependency stays a pure function; this field is filled in by the
+	// caller that has the policy in hand.
+	CounsellingReferral *CounsellingReferral `json:"counselling_referral,omitempty"`
+}
+
+// CounsellingReferral names a next step beyond another advance. Message is
+// always present once offered; ResourceName/Contact are only set when the
+// employer has actually configured their own resource — never a third-party
+// service invented on the employer's behalf.
+type CounsellingReferral struct {
+	Message      string `json:"message"`
+	ResourceName string `json:"resource_name,omitempty"`
+	Contact      string `json:"contact,omitempty"`
+}
+
+// TierCounsellingReferral returns a referral for Strained and Dependent —
+// the emergency floor already keeps a minimum available at those tiers, but
+// the honest next step often isn't another advance at all. Nil below
+// Strained: a healthy or merely elevated pattern doesn't warrant it.
+func TierCounsellingReferral(tier models.DependencyTier, policy models.EWAPolicy) *CounsellingReferral {
+	switch tier {
+	case models.TierStrained, models.TierDependent:
+	default:
+		return nil
+	}
+
+	if policy.CounsellingResourceName != "" || policy.CounsellingContact != "" {
+		return &CounsellingReferral{
+			Message:      "Your employer offers financial counselling that may help more than another advance.",
+			ResourceName: policy.CounsellingResourceName,
+			Contact:      policy.CounsellingContact,
+		}
+	}
+	return &CounsellingReferral{
+		Message: "Consider speaking with a financial counsellor about your options — it may help more than another advance.",
+	}
 }
 
 // ScoreDependency computes the dependency assessment. Pure function.

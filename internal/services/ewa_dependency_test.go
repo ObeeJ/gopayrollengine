@@ -328,3 +328,40 @@ func TestScoreDependency_SignalsAlwaysPopulated(t *testing.T) {
 		require.True(t, ok, "signal %q must always be reported for explainability", key)
 	}
 }
+
+func TestTierCounsellingReferral_HealthyAndElevatedHaveNone(t *testing.T) {
+	policy := models.DefaultEWAPolicy("ORG-1")
+	assert.Nil(t, TierCounsellingReferral(models.TierHealthy, policy))
+	assert.Nil(t, TierCounsellingReferral(models.TierElevated, policy))
+}
+
+func TestTierCounsellingReferral_StrainedAndDependentHaveOne(t *testing.T) {
+	policy := models.DefaultEWAPolicy("ORG-1")
+	for _, tier := range []models.DependencyTier{models.TierStrained, models.TierDependent} {
+		ref := TierCounsellingReferral(tier, policy)
+		require.NotNil(t, ref, "tier %s must offer a referral", tier)
+		assert.NotEmpty(t, ref.Message)
+	}
+}
+
+func TestTierCounsellingReferral_NoDefaultThirdPartyNamed(t *testing.T) {
+	// Unconfigured policy: the referral must still name the option honestly,
+	// but must never invent a specific resource or contact on the employer's
+	// behalf.
+	policy := models.DefaultEWAPolicy("ORG-1")
+	ref := TierCounsellingReferral(models.TierStrained, policy)
+	require.NotNil(t, ref)
+	assert.Empty(t, ref.ResourceName)
+	assert.Empty(t, ref.Contact)
+}
+
+func TestTierCounsellingReferral_UsesEmployerConfiguredResource(t *testing.T) {
+	policy := models.DefaultEWAPolicy("ORG-1")
+	policy.CounsellingResourceName = "Acme EAP"
+	policy.CounsellingContact = "0800-000-0000"
+
+	ref := TierCounsellingReferral(models.TierDependent, policy)
+	require.NotNil(t, ref)
+	assert.Equal(t, "Acme EAP", ref.ResourceName)
+	assert.Equal(t, "0800-000-0000", ref.Contact)
+}

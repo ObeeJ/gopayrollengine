@@ -103,6 +103,14 @@ type EWAPolicy struct {
 	// all of them from any further draw the moment it ships.
 	RequireFundingCoverage bool `gorm:"column:require_funding_coverage;default:false" json:"require_funding_coverage"`
 
+	// CounsellingResourceName / CounsellingContact — the employer's own
+	// financial counselling resource (an Employee Assistance Program or
+	// equivalent), surfaced to a worker at the Strained tier and above.
+	// Empty by default: no third-party service is ever named on the
+	// employer's behalf without their say-so.
+	CounsellingResourceName string `gorm:"column:counselling_resource_name;default:''" json:"counselling_resource_name"`
+	CounsellingContact      string `gorm:"column:counselling_contact;default:''" json:"counselling_contact"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

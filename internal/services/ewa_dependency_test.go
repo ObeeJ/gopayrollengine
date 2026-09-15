@@ -217,7 +217,7 @@ func TestTierFor_Boundaries(t *testing.T) {
 // worker off completely. A hard zero pushes people to payday lenders, which is
 // the outcome the whole feature exists to avoid.
 func TestTierCap_NeverDropsToZero(t *testing.T) {
-	policy := models.DefaultEWAPolicy("ORG-1")
+	policy := models.DefaultEWAPolicy("ORG-1", money.NGN)
 	policyCap := money.FromNaira(150_000)
 
 	for _, tier := range []models.DependencyTier{
@@ -231,7 +231,7 @@ func TestTierCap_NeverDropsToZero(t *testing.T) {
 }
 
 func TestTierCap_TightensAsDependencyDeepens(t *testing.T) {
-	policy := models.DefaultEWAPolicy("ORG-1")
+	policy := models.DefaultEWAPolicy("ORG-1", money.NGN)
 	policyCap := money.FromNaira(150_000)
 
 	healthy := TierCap(models.TierHealthy, policyCap, policy)
@@ -249,7 +249,7 @@ func TestTierCap_TightensAsDependencyDeepens(t *testing.T) {
 // floor is a protection against over-restriction, not an entitlement to more
 // than the worker has actually earned.
 func TestTierCap_DoesNotExceedEarnedCap(t *testing.T) {
-	policy := models.DefaultEWAPolicy("ORG-1")
+	policy := models.DefaultEWAPolicy("ORG-1", money.NGN)
 	tiny := money.FromNaira(2_000) // below the ₦5,000 emergency floor
 
 	for _, tier := range []models.DependencyTier{models.TierStrained, models.TierDependent} {
@@ -260,7 +260,7 @@ func TestTierCap_DoesNotExceedEarnedCap(t *testing.T) {
 }
 
 func TestTierCoolingOff_DoublesUnderStrain(t *testing.T) {
-	policy := models.DefaultEWAPolicy("ORG-1")
+	policy := models.DefaultEWAPolicy("ORG-1", money.NGN)
 	base := time.Duration(policy.CoolingOffHours) * time.Hour
 
 	assert.Equal(t, base, TierCoolingOff(models.TierHealthy, policy))
@@ -330,13 +330,13 @@ func TestScoreDependency_SignalsAlwaysPopulated(t *testing.T) {
 }
 
 func TestTierCounsellingReferral_HealthyAndElevatedHaveNone(t *testing.T) {
-	policy := models.DefaultEWAPolicy("ORG-1")
+	policy := models.DefaultEWAPolicy("ORG-1", money.NGN)
 	assert.Nil(t, TierCounsellingReferral(models.TierHealthy, policy))
 	assert.Nil(t, TierCounsellingReferral(models.TierElevated, policy))
 }
 
 func TestTierCounsellingReferral_StrainedAndDependentHaveOne(t *testing.T) {
-	policy := models.DefaultEWAPolicy("ORG-1")
+	policy := models.DefaultEWAPolicy("ORG-1", money.NGN)
 	for _, tier := range []models.DependencyTier{models.TierStrained, models.TierDependent} {
 		ref := TierCounsellingReferral(tier, policy)
 		require.NotNil(t, ref, "tier %s must offer a referral", tier)
@@ -348,7 +348,7 @@ func TestTierCounsellingReferral_NoDefaultThirdPartyNamed(t *testing.T) {
 	// Unconfigured policy: the referral must still name the option honestly,
 	// but must never invent a specific resource or contact on the employer's
 	// behalf.
-	policy := models.DefaultEWAPolicy("ORG-1")
+	policy := models.DefaultEWAPolicy("ORG-1", money.NGN)
 	ref := TierCounsellingReferral(models.TierStrained, policy)
 	require.NotNil(t, ref)
 	assert.Empty(t, ref.ResourceName)
@@ -356,7 +356,7 @@ func TestTierCounsellingReferral_NoDefaultThirdPartyNamed(t *testing.T) {
 }
 
 func TestTierCounsellingReferral_UsesEmployerConfiguredResource(t *testing.T) {
-	policy := models.DefaultEWAPolicy("ORG-1")
+	policy := models.DefaultEWAPolicy("ORG-1", money.NGN)
 	policy.CounsellingResourceName = "Acme EAP"
 	policy.CounsellingContact = "0800-000-0000"
 

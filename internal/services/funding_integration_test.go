@@ -22,7 +22,7 @@ import (
 // requires a real row, not just an override on the zero-value struct.
 func enableFundingCoverage(t *testing.T, orgID string) {
 	t.Helper()
-	policy := models.DefaultEWAPolicy(orgID)
+	policy := models.DefaultEWAPolicy(orgID, money.NGN)
 	policy.RequireFundingCoverage = true
 	require.NoError(t, models.DB.Create(&policy).Error)
 }

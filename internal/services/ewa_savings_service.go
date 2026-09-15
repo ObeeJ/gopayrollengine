@@ -122,7 +122,11 @@ func (s *EWAService) savingsPreferenceTx(
 func (s *EWAService) GetSavingsBalance(ctx context.Context, orgID, employeeID string) (money.Kobo, error) {
 	var balance money.Kobo
 	err := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
-		acct, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountEmployeeSavings, money.NGN)
+		currency, err := models.OrgCurrencyTx(tx, orgID)
+		if err != nil {
+			return err
+		}
+		acct, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountEmployeeSavings, currency)
 		if err != nil {
 			return err
 		}
@@ -183,11 +187,15 @@ func (s *EWAService) DivertSavingsForPayrollItem(
 		return money.Zero, nil
 	}
 
-	payable, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountWagePayable, money.NGN)
+	currency, err := models.OrgCurrencyTx(tx, orgID)
 	if err != nil {
 		return 0, err
 	}
-	savings, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountEmployeeSavings, money.NGN)
+	payable, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountWagePayable, currency)
+	if err != nil {
+		return 0, err
+	}
+	savings, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountEmployeeSavings, currency)
 	if err != nil {
 		return 0, err
 	}
@@ -198,8 +206,8 @@ func (s *EWAService) DivertSavingsForPayrollItem(
 		Reference:      employeeID,
 		IdempotencyKey: "ewa_savings:" + payrollItemID,
 		Entries: []models.EntryInput{
-			{AccountID: payable.ID, Direction: models.Debit, Amount: money.NGNFromKobo(amount)},
-			{AccountID: savings.ID, Direction: models.Credit, Amount: money.NGNFromKobo(amount)},
+			{AccountID: payable.ID, Direction: models.Debit, Amount: money.KoboIn(currency, amount)},
+			{AccountID: savings.ID, Direction: models.Credit, Amount: money.KoboIn(currency, amount)},
 		},
 	}); err != nil {
 		observability.LedgerImbalanceTotal.WithLabelValues(orgID).Inc()

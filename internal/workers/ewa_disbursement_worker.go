@@ -59,6 +59,7 @@ func (h *EWADisbursementHandler) ProcessEWADisbursementTask(ctx context.Context,
 
 	var advance models.EWAAdvance
 	var employee models.Employee
+	var currency money.Currency
 
 	err := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
 		if err := tx.First(&advance, "id = ?", advanceID).Error; err != nil {
@@ -66,6 +67,11 @@ func (h *EWADisbursementHandler) ProcessEWADisbursementTask(ctx context.Context,
 		}
 		if advance.ProviderReference != nil || advance.Status != models.AdvanceApproved {
 			return errNotSubmittable
+		}
+		var err error
+		currency, err = models.OrgCurrencyTx(tx, orgID)
+		if err != nil {
+			return err
 		}
 		return tx.First(&employee, "id = ?", advance.EmployeeID).Error
 	})
@@ -78,7 +84,7 @@ func (h *EWADisbursementHandler) ProcessEWADisbursementTask(ctx context.Context,
 		return fmt.Errorf("ewa advance %s: load failed: %w", advanceID, err)
 	}
 
-	amount := money.NGNFromKobo(advance.AmountKobo)
+	amount := money.KoboIn(currency, advance.AmountKobo)
 	pay, err := h.Registry.Select(amount.Currency)
 	if err != nil {
 		// No provider can settle this currency at all — a configuration problem,

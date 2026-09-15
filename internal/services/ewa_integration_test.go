@@ -907,7 +907,7 @@ func TestSetProtectedPayday_LoweringIsRateLimited(t *testing.T) {
 	require.ErrorIs(t, err, ErrFloorLoweringRateLimited)
 
 	// After the org's cooling-off window has elapsed, lowering succeeds.
-	policy := models.DefaultEWAPolicy(orgID)
+	policy := models.DefaultEWAPolicy(orgID, money.NGN)
 	later := now.Add(time.Duration(policy.CoolingOffHours)*time.Hour + time.Minute)
 	pref, err := svc.SetProtectedPayday(context.Background(), orgID, employeeID, money.FromNaira(10_000), later)
 	require.NoError(t, err)
@@ -921,7 +921,7 @@ func TestSetProtectedPayday_ConsecutiveLoweringsAreEachRateLimited(t *testing.T)
 	skipIfNoDB(t)
 	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
 	svc := NewEWAService()
-	policy := models.DefaultEWAPolicy(orgID)
+	policy := models.DefaultEWAPolicy(orgID, money.NGN)
 	cooldown := time.Duration(policy.CoolingOffHours) * time.Hour
 
 	t0 := time.Now()

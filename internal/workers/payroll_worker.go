@@ -146,6 +146,17 @@ func (h *PayrollHandler) ProcessPayrollTask(ctx context.Context, t *asynq.Task) 
 	}
 
 	// Build the Monnify payload — one line per sendable item, one API call for all of them.
+	//
+	// CurrencyCode and .Naira() are both deliberately NGN-specific: this whole
+	// path calls Monnify's bulk-transfer API directly (not the currency-routed
+	// provider.Registry — bulk transfer has no equivalent there, see
+	// provider.TransferRequest's doc comment on why it's single-recipient
+	// only), and Monnify itself only ever settles NGN. PayrollService.CreatePayroll
+	// already refuses to create a run for any org whose currency no provider
+	// can settle, so every payroll that reaches this worker is NGN by the
+	// time it gets here — this isn't an oversight, it's what keeps that
+	// guarantee true without silently mislabeling money in another currency
+	// as Naira.
 	transactionList := make([]monnify.TransferDetail, 0, len(sendable))
 	for _, item := range sendable {
 		emp := empMap[item.EmployeeID]

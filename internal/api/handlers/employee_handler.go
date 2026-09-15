@@ -30,12 +30,15 @@ func NewEmployeeHandler(r repository.EmployeeRepository, ewa *services.EWAServic
 // CreateEmployee — admin-only; employee + consent + audit commit atomically, BVN reconciles out-of-band.
 func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 	var req struct {
-		Name          string          `json:"name" binding:"required"`
-		Email         string          `json:"email" binding:"required,email"`
-		AccountNumber string          `json:"account_number" binding:"required"`
-		BankCode      string          `json:"bank_code" binding:"required"`
-		BVN           string          `json:"bvn" binding:"required"`
-		WageType      models.WageType `json:"wage_type"` // "salaried" (default) or "hourly"
+		Name          string `json:"name" binding:"required"`
+		Email         string `json:"email" binding:"required,email"`
+		AccountNumber string `json:"account_number" binding:"required"`
+		BankCode      string `json:"bank_code" binding:"required"`
+		// BVN — required only for an NGN org (CBN's KYC requirement); not
+		// bound with "required" because that can't be conditioned on the
+		// org's currency, which isn't known until after binding.
+		BVN      string          `json:"bvn"`
+		WageType models.WageType `json:"wage_type"` // "salaried" (default) or "hourly"
 
 		// Exactly one of these must be set, per WageType. Not bound with
 		// "required" — required would demand both regardless of wage type.
@@ -66,6 +69,23 @@ func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 	}
 
 	orgID := middleware.OrgID(c)
+
+	// BVN is Nigeria's own KYC requirement (see migration 000002's comment:
+	// "CBN requires KYC at employee creation") — meaningless, and a real
+	// onboarding blocker, for an employee whose org operates in any other
+	// currency.
+	currency, err := models.OrgCurrencyTx(models.DB, orgID)
+	if err != nil {
+		middleware.Logger.Error("employee create: org currency lookup failed", "org_id", orgID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create employee"})
+		return
+	}
+	requiresBVN := currency == money.NGN
+	if requiresBVN && req.BVN == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "bvn is required"})
+		return
+	}
+
 	emp := models.Employee{
 		OrganizationID: orgID,
 		Name:           req.Name,
@@ -102,9 +122,13 @@ func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 		return
 	}
 
-	// BVN check enqueued async — Dojah latency and transient failures don't block the response.
-	if err := workers.EnqueueBVNVerification(orgID, emp.ID, req.BVN); err != nil {
-		middleware.Logger.Warn("BVN enqueue failed", "employee_id", emp.ID, "error", err.Error())
+	// BVN check enqueued async — Dojah latency and transient failures don't
+	// block the response. Skipped entirely for a non-NGN org: there is no
+	// BVN to verify.
+	if requiresBVN {
+		if err := workers.EnqueueBVNVerification(orgID, emp.ID, req.BVN); err != nil {
+			middleware.Logger.Warn("BVN enqueue failed", "employee_id", emp.ID, "error", err.Error())
+		}
 	}
 
 	c.JSON(http.StatusCreated, emp)

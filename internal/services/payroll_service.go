@@ -55,21 +55,25 @@ func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string
 		netAmounts := make([]money.Kobo, 0, len(employees))
 		for _, emp := range employees {
 			gross := emp.Salary
+			var hourlyEntryIDs []string
 			if emp.IsHourly() {
 				// Gross is real approved hours × rate, with shift
 				// differentials and weekly overtime applied, never the fixed
 				// Salary column, which hourly employees don't use. asOf=now
 				// is safe here: payroll normally runs after the period has
 				// closed, so the period boundary — not the asOf bound — is
-				// what limits the computation to this period's entries. An
-				// entry approved after this payroll already ran is out of
-				// scope for this run, the same way a late-approved advance
-				// would be.
+				// what limits how far into the future this reaches. An entry
+				// approved after ITS OWN period's payroll already ran is not
+				// lost, though: ComputeHourlyGross sweeps any never-paid
+				// approved entry regardless of which period it fell in, and
+				// MarkTimeEntriesPaid below stamps every entry it used so no
+				// later run pays them again.
 				breakdown, err := ComputeHourlyGross(tx, orgID, emp.ID, period, time.Now(), emp.HourlyRateKobo)
 				if err != nil {
 					return fmt.Errorf("hourly gross computation for %s failed: %w", emp.ID, err)
 				}
 				gross = breakdown.GrossKobo
+				hourlyEntryIDs = breakdown.EntryIDs
 			}
 
 			item := models.PayrollItem{
@@ -82,6 +86,9 @@ func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string
 			}
 			if err := txPayrollRepo.CreateItem(&item); err != nil {
 				return err
+			}
+			if err := models.MarkTimeEntriesPaid(tx, orgID, hourlyEntryIDs, item.ID); err != nil {
+				return fmt.Errorf("marking time entries paid for %s failed: %w", emp.ID, err)
 			}
 
 			// gross caps what settlement may withhold: SettleAdvancesForPayrollItem

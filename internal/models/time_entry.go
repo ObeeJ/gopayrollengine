@@ -63,6 +63,11 @@ type TimeEntry struct {
 	Status        TimeEntryStatus    `gorm:"default:pending" json:"status"`
 	Note          string             `json:"note,omitempty"`
 
+	// PaidPayrollItemID is set once, atomically, by the payroll run that pays
+	// this entry's minutes (models.MarkTimeEntriesPaid) — nil until then.
+	// Never cleared or reassigned: see migration 000028.
+	PaidPayrollItemID *string `gorm:"column:paid_payroll_item_id" json:"paid_payroll_item_id,omitempty"`
+
 	RejectionReason string     `json:"rejection_reason,omitempty"`
 	ApprovedBy      string     `json:"approved_by,omitempty"`
 	ApprovedAt      *time.Time `json:"approved_at,omitempty"`
@@ -119,6 +124,34 @@ func TransitionTimeEntry(db *gorm.DB, entry *TimeEntry, current, next TimeEntryS
 	return nil
 }
 
+// periodUpperBound returns the exclusive upper work_date bound for `period`
+// (YYYY-MM): the period's own end, capped at asOf's day-plus-one so a run
+// before the period closes never reaches into days that haven't happened
+// yet. Shared by every entries-through-a-period query — see
+// ApprovedEntriesForPeriod and UnpaidApprovedEntriesThrough.
+//
+// work_date is a DATE column with no time-of-day component, so the bound
+// must be day-aligned too. A sub-day instant is ambiguous: Postgres infers
+// an untyped parameter compared against a DATE column as DATE itself,
+// silently truncating the time and turning a same-day upper bound into a
+// same-day equality — which a strict "<" then always fails, excluding
+// today's entries entirely. Rounding up to the start of the next day makes
+// the bound exact regardless of how the driver types it.
+func periodUpperBound(period string, asOf time.Time) (time.Time, error) {
+	start, err := time.ParseInLocation(PeriodLayout, period, asOf.Location())
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid period %q: %w", period, err)
+	}
+	end := start.AddDate(0, 1, 0)
+
+	asOfDate := time.Date(asOf.Year(), asOf.Month(), asOf.Day(), 0, 0, 0, 0, asOf.Location())
+	upperExclusive := asOfDate.AddDate(0, 0, 1)
+	if upperExclusive.After(end) {
+		upperExclusive = end
+	}
+	return upperExclusive, nil
+}
+
 // ApprovedEntriesForPeriod loads approved entries for an employee within
 // `period` (YYYY-MM), counting only entries on or before asOf. The asOf bound
 // makes this function do double duty: called with "now" mid-period it gives
@@ -128,24 +161,19 @@ func TransitionTimeEntry(db *gorm.DB, entry *TimeEntry, current, next TimeEntryS
 // no work_date beyond the period end can exist yet to be excluded. Ordered
 // oldest first (WorkDate, then ID as a stable tiebreak) for callers that
 // attribute minutes in chronological order, such as weekly overtime.
+//
+// This is period-scoped by design and stays that way: it backs EWA
+// eligibility's accrual estimate, which should reflect wages earned this
+// period regardless of whether payroll has already paid for them. For
+// payroll gross itself, see UnpaidApprovedEntriesThrough.
 func ApprovedEntriesForPeriod(tx *gorm.DB, orgID, employeeID, period string, asOf time.Time) ([]TimeEntry, error) {
 	start, err := time.ParseInLocation(PeriodLayout, period, asOf.Location())
 	if err != nil {
 		return nil, fmt.Errorf("invalid period %q: %w", period, err)
 	}
-	end := start.AddDate(0, 1, 0)
-
-	// work_date is a DATE column with no time-of-day component, so both bounds
-	// must be day-aligned too. A sub-day instant bound is ambiguous: Postgres
-	// infers an untyped parameter compared against a DATE column as DATE
-	// itself, silently truncating the time and turning a same-day upper bound
-	// into a same-day equality — which a strict "<" then always fails,
-	// excluding today's entries entirely. Rounding up to the start of the next
-	// day makes the bound exact regardless of how the driver types it.
-	asOfDate := time.Date(asOf.Year(), asOf.Month(), asOf.Day(), 0, 0, 0, 0, asOf.Location())
-	upperExclusive := asOfDate.AddDate(0, 0, 1)
-	if upperExclusive.After(end) {
-		upperExclusive = end
+	upperExclusive, err := periodUpperBound(period, asOf)
+	if err != nil {
+		return nil, err
 	}
 
 	var entries []TimeEntry
@@ -157,6 +185,70 @@ func ApprovedEntriesForPeriod(tx *gorm.DB, orgID, employeeID, period string, asO
 		return nil, err
 	}
 	return entries, nil
+}
+
+// UnpaidApprovedEntriesThrough loads approved entries that no payroll run has
+// ever paid (paid_payroll_item_id IS NULL), with work_date before `period`'s
+// end (see periodUpperBound). Unlike ApprovedEntriesForPeriod there is no
+// lower bound: an entry approved after its own period's payroll already ran
+// is still unpaid, and this is what lets the next run that comes along pick
+// it up instead of it being silently dropped forever. Ordered oldest first,
+// same as ApprovedEntriesForPeriod.
+//
+// The only caller is services.ComputeHourlyGross — payroll gross, which must
+// eventually pay every approved entry exactly once, unlike EWA accrual
+// (ApprovedEntriesForPeriod), which stays period-scoped by design.
+func UnpaidApprovedEntriesThrough(tx *gorm.DB, orgID, employeeID, period string, asOf time.Time) ([]TimeEntry, error) {
+	upperExclusive, err := periodUpperBound(period, asOf)
+	if err != nil {
+		return nil, err
+	}
+
+	var entries []TimeEntry
+	err = tx.Where("organization_id = ? AND employee_id = ? AND status = ? AND paid_payroll_item_id IS NULL",
+		orgID, employeeID, TimeEntryApproved).
+		Where("work_date < ?", upperExclusive).
+		Order("work_date ASC, id ASC").
+		Find(&entries).Error
+	if err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+// PaidMinutesInISOWeek sums minutes already paid by a prior payroll run
+// (paid_payroll_item_id IS NOT NULL) for an employee's approved entries
+// falling in ISO week (isoYear, isoWeek) — Postgres's ISOYEAR/WEEK EXTRACT
+// fields match Go's time.Time.ISOWeek() exactly. ComputeHourlyGross uses
+// this to seed a week's running overtime total when a late-swept entry
+// belongs to a week a previous run already partly paid: without it, a late
+// approval could be underpaid as regular time even though the week's
+// overtime threshold was already crossed.
+func PaidMinutesInISOWeek(tx *gorm.DB, orgID, employeeID string, isoYear, isoWeek int) (int64, error) {
+	var total int64
+	err := tx.Model(&TimeEntry{}).
+		Where("organization_id = ? AND employee_id = ? AND status = ? AND paid_payroll_item_id IS NOT NULL",
+			orgID, employeeID, TimeEntryApproved).
+		Where("EXTRACT(ISOYEAR FROM work_date) = ? AND EXTRACT(WEEK FROM work_date) = ?", isoYear, isoWeek).
+		Select("COALESCE(SUM(minutes_worked), 0)").
+		Scan(&total).Error
+	if err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+// MarkTimeEntriesPaid records that payrollItemID has paid for entryIDs, so no
+// later run ever pays them again. Must run in the same transaction as the
+// payroll item's own creation — a rollback of one must roll back the other,
+// or a failed run could either double-pay or permanently lose these minutes.
+func MarkTimeEntriesPaid(tx *gorm.DB, orgID string, entryIDs []string, payrollItemID string) error {
+	if len(entryIDs) == 0 {
+		return nil
+	}
+	return tx.Model(&TimeEntry{}).
+		Where("organization_id = ? AND id IN ?", orgID, entryIDs).
+		Update("paid_payroll_item_id", payrollItemID).Error
 }
 
 // SumApprovedMinutes totals approved minutes worked by an employee within

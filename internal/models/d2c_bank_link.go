@@ -31,6 +31,14 @@ type D2CBankLink struct {
 	ProviderAccountRef string            `gorm:"column:provider_account_ref;not null" json:"provider_account_ref"`
 	Status             D2CBankLinkStatus `gorm:"default:linked" json:"status"`
 
+	// DebitMandateRef / DebitAuthorizedAt — set only once the worker
+	// explicitly authorizes this account to be debited, a separate step
+	// from linking it (see migration 000031's comment). Nil means this link
+	// can be read from for payday prediction but nothing may be pulled from
+	// it yet.
+	DebitMandateRef   *string    `gorm:"column:debit_mandate_ref" json:"debit_mandate_ref,omitempty"`
+	DebitAuthorizedAt *time.Time `gorm:"column:debit_authorized_at" json:"debit_authorized_at,omitempty"`
+
 	LinkedAt     time.Time  `json:"linked_at"`
 	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
 	LastSyncedAt *time.Time `json:"last_synced_at,omitempty"`

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"go-payroll-engine/internal/models"
 	"go-payroll-engine/pkg/money"
 
 	"github.com/stretchr/testify/assert"
@@ -26,12 +27,12 @@ func TestGetEligibility_HourlyEmployee_OnlyCountsApprovedEntries(t *testing.T) {
 	now := time.Now()
 
 	// 8h approved, 8h still pending — only the approved hours must accrue.
-	approved, err := teSvc.SubmitTimeEntry(context.Background(), orgID, employeeID, now, 480, "")
+	approved, err := teSvc.SubmitTimeEntry(context.Background(), orgID, employeeID, now, 480, models.ShiftRegular, "")
 	require.NoError(t, err)
 	_, err = teSvc.ApproveTimeEntry(context.Background(), orgID, approved.ID, "admin", "127.0.0.1")
 	require.NoError(t, err)
 
-	_, err = teSvc.SubmitTimeEntry(context.Background(), orgID, employeeID, now, 480, "still pending")
+	_, err = teSvc.SubmitTimeEntry(context.Background(), orgID, employeeID, now, 480, models.ShiftRegular, "still pending")
 	require.NoError(t, err)
 
 	el, err := ewaSvc.GetEligibility(context.Background(), orgID, employeeID, now)
@@ -49,7 +50,7 @@ func TestGetEligibility_HourlyEmployee_RejectedEntriesDoNotCount(t *testing.T) {
 	ewaSvc := NewEWAService()
 	now := time.Now()
 
-	entry, err := teSvc.SubmitTimeEntry(context.Background(), orgID, employeeID, now, 480, "")
+	entry, err := teSvc.SubmitTimeEntry(context.Background(), orgID, employeeID, now, 480, models.ShiftRegular, "")
 	require.NoError(t, err)
 	_, err = teSvc.RejectTimeEntry(context.Background(), orgID, entry.ID, "admin", "127.0.0.1", "duplicate entry")
 	require.NoError(t, err)
@@ -88,7 +89,7 @@ func TestGetEligibility_HourlyEmployee_PriorPeriodEntriesExcluded(t *testing.T) 
 		t.Skip("test anchor date too close to a month boundary")
 	}
 
-	entry, err := teSvc.SubmitTimeEntry(context.Background(), orgID, employeeID, lastMonth, 480, "")
+	entry, err := teSvc.SubmitTimeEntry(context.Background(), orgID, employeeID, lastMonth, 480, models.ShiftRegular, "")
 	require.NoError(t, err)
 	_, err = teSvc.ApproveTimeEntry(context.Background(), orgID, entry.ID, "admin", "127.0.0.1")
 	require.NoError(t, err)

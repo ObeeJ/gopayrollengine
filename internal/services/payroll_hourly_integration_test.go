@@ -24,13 +24,13 @@ func TestCreatePayroll_HourlyEmployee_GrossFromApprovedMinutesOnly(t *testing.T)
 	now := time.Now()
 	period := now.Format(PeriodLayout)
 
-	approved, err := teSvc.SubmitTimeEntry(context.Background(), orgID, employeeID, now, 600, "") // 10h
+	approved, err := teSvc.SubmitTimeEntry(context.Background(), orgID, employeeID, now, 600, models.ShiftRegular, "") // 10h
 	require.NoError(t, err)
 	_, err = teSvc.ApproveTimeEntry(context.Background(), orgID, approved.ID, "admin", "127.0.0.1")
 	require.NoError(t, err)
 
 	// Still pending at payroll time — must not be paid for.
-	_, err = teSvc.SubmitTimeEntry(context.Background(), orgID, employeeID, now, 120, "")
+	_, err = teSvc.SubmitTimeEntry(context.Background(), orgID, employeeID, now, 120, models.ShiftRegular, "")
 	require.NoError(t, err)
 
 	payrollSvc := NewPayrollService(

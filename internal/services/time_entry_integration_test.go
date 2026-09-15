@@ -48,7 +48,7 @@ func TestSubmitTimeEntry_Succeeds(t *testing.T) {
 	svc := NewTimeEntryService()
 
 	entry, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID,
-		time.Now().AddDate(0, 0, -1), 480, "covered the morning shift")
+		time.Now().AddDate(0, 0, -1), 480, models.ShiftRegular, "covered the morning shift")
 	require.NoError(t, err)
 	assert.Equal(t, models.TimeEntryPending, entry.Status)
 	assert.Equal(t, 480, entry.MinutesWorked)
@@ -59,7 +59,7 @@ func TestSubmitTimeEntry_RejectsSalariedEmployee(t *testing.T) {
 	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
 	svc := NewTimeEntryService()
 
-	_, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID, time.Now(), 480, "")
+	_, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID, time.Now(), 480, models.ShiftRegular, "")
 	require.ErrorIs(t, err, ErrTimeEntryNotHourly)
 }
 
@@ -69,8 +69,27 @@ func TestSubmitTimeEntry_RejectsFutureDate(t *testing.T) {
 	svc := NewTimeEntryService()
 
 	_, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID,
-		time.Now().AddDate(0, 0, 1), 480, "")
+		time.Now().AddDate(0, 0, 1), 480, models.ShiftRegular, "")
 	require.ErrorIs(t, err, ErrTimeEntryFutureDate)
+}
+
+func TestSubmitTimeEntry_RejectsInvalidShiftType(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedHourlyWorker(t, money.FromNaira(1_500))
+	svc := NewTimeEntryService()
+
+	_, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID, time.Now(), 240, "public_holiday", "")
+	require.ErrorIs(t, err, ErrTimeEntryInvalidShift)
+}
+
+func TestSubmitTimeEntry_EmptyShiftTypeDefaultsToRegular(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedHourlyWorker(t, money.FromNaira(1_500))
+	svc := NewTimeEntryService()
+
+	entry, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID, time.Now(), 240, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, models.ShiftRegular, entry.ShiftType)
 }
 
 func TestSubmitTimeEntry_RejectsOutOfRangeMinutes(t *testing.T) {
@@ -79,7 +98,7 @@ func TestSubmitTimeEntry_RejectsOutOfRangeMinutes(t *testing.T) {
 	svc := NewTimeEntryService()
 
 	for _, minutes := range []int{0, -30, 1441} {
-		_, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID, time.Now(), minutes, "")
+		_, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID, time.Now(), minutes, models.ShiftRegular, "")
 		require.ErrorIsf(t, err, ErrTimeEntryInvalidRange, "minutes=%d should be rejected", minutes)
 	}
 }
@@ -89,7 +108,7 @@ func TestApproveTimeEntry_MovesToApprovedAndRecordsApprover(t *testing.T) {
 	orgID, employeeID := seedHourlyWorker(t, money.FromNaira(1_500))
 	svc := NewTimeEntryService()
 
-	entry, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID, time.Now(), 240, "")
+	entry, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID, time.Now(), 240, models.ShiftRegular, "")
 	require.NoError(t, err)
 
 	approved, err := svc.ApproveTimeEntry(context.Background(), orgID, entry.ID, "admin", "127.0.0.1")
@@ -106,7 +125,7 @@ func TestApproveTimeEntry_DoubleApprovalIsRefused(t *testing.T) {
 	orgID, employeeID := seedHourlyWorker(t, money.FromNaira(1_500))
 	svc := NewTimeEntryService()
 
-	entry, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID, time.Now(), 240, "")
+	entry, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID, time.Now(), 240, models.ShiftRegular, "")
 	require.NoError(t, err)
 
 	_, err = svc.ApproveTimeEntry(context.Background(), orgID, entry.ID, "admin", "127.0.0.1")
@@ -121,7 +140,7 @@ func TestRejectTimeEntry_RecordsReason(t *testing.T) {
 	orgID, employeeID := seedHourlyWorker(t, money.FromNaira(1_500))
 	svc := NewTimeEntryService()
 
-	entry, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID, time.Now(), 240, "")
+	entry, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID, time.Now(), 240, models.ShiftRegular, "")
 	require.NoError(t, err)
 
 	rejected, err := svc.RejectTimeEntry(context.Background(), orgID, entry.ID, "admin", "127.0.0.1", "does not match the shift log")
@@ -135,9 +154,9 @@ func TestListTimeEntries_FiltersByStatus(t *testing.T) {
 	orgID, employeeID := seedHourlyWorker(t, money.FromNaira(1_500))
 	svc := NewTimeEntryService()
 
-	pending, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID, time.Now(), 120, "")
+	pending, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID, time.Now(), 120, models.ShiftRegular, "")
 	require.NoError(t, err)
-	toApprove, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID, time.Now().AddDate(0, 0, -1), 180, "")
+	toApprove, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID, time.Now().AddDate(0, 0, -1), 180, models.ShiftRegular, "")
 	require.NoError(t, err)
 	_, err = svc.ApproveTimeEntry(context.Background(), orgID, toApprove.ID, "admin", "127.0.0.1")
 	require.NoError(t, err)

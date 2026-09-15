@@ -35,6 +35,20 @@ func CanTransitionTimeEntry(from, to TimeEntryStatus) bool {
 	return false
 }
 
+// TimeEntryShiftType — which pay differential, if any, applies to an entry's
+// hours. Self-declared by the worker at submission: work_date is a DATE with
+// no time-of-day, so there is no way to infer "night" from it, and "holiday"
+// depends on a calendar this table doesn't have. Like minutes_worked itself,
+// it is a claim until an admin approves the entry.
+type TimeEntryShiftType string
+
+const (
+	ShiftRegular TimeEntryShiftType = "regular"
+	ShiftNight   TimeEntryShiftType = "night"
+	ShiftWeekend TimeEntryShiftType = "weekend"
+	ShiftHoliday TimeEntryShiftType = "holiday"
+)
+
 // TimeEntry — one logged block of work for an hourly or gig employee. Counts
 // toward accrual, EWA eligibility, and payroll only once Status is 'approved':
 // a pending entry is a worker's claim, not verified evidence of wages earned.
@@ -43,10 +57,11 @@ type TimeEntry struct {
 	OrganizationID string `gorm:"index;not null" json:"organization_id"`
 	EmployeeID     string `gorm:"index;not null" json:"employee_id"`
 
-	WorkDate      time.Time       `gorm:"type:date;not null" json:"work_date"`
-	MinutesWorked int             `gorm:"not null" json:"minutes_worked"`
-	Status        TimeEntryStatus `gorm:"default:pending" json:"status"`
-	Note          string          `json:"note,omitempty"`
+	WorkDate      time.Time          `gorm:"type:date;not null" json:"work_date"`
+	MinutesWorked int                `gorm:"not null" json:"minutes_worked"`
+	ShiftType     TimeEntryShiftType `gorm:"column:shift_type;default:regular" json:"shift_type"`
+	Status        TimeEntryStatus    `gorm:"default:pending" json:"status"`
+	Note          string             `json:"note,omitempty"`
 
 	RejectionReason string     `json:"rejection_reason,omitempty"`
 	ApprovedBy      string     `json:"approved_by,omitempty"`
@@ -104,17 +119,19 @@ func TransitionTimeEntry(db *gorm.DB, entry *TimeEntry, current, next TimeEntryS
 	return nil
 }
 
-// SumApprovedMinutes totals approved minutes worked by an employee within
+// ApprovedEntriesForPeriod loads approved entries for an employee within
 // `period` (YYYY-MM), counting only entries on or before asOf. The asOf bound
 // makes this function do double duty: called with "now" mid-period it gives
-// EWA eligibility a partial-period figure that grows as more entries are
+// EWA eligibility a partial-period view that grows as more entries are
 // approved, and called after the period has closed (the normal case for a
-// payroll run) it naturally returns the whole period's approved hours since
-// no work_date beyond the period end can exist yet to be excluded.
-func SumApprovedMinutes(tx *gorm.DB, orgID, employeeID, period string, asOf time.Time) (int64, error) {
+// payroll run) it naturally returns the whole period's approved entries since
+// no work_date beyond the period end can exist yet to be excluded. Ordered
+// oldest first (WorkDate, then ID as a stable tiebreak) for callers that
+// attribute minutes in chronological order, such as weekly overtime.
+func ApprovedEntriesForPeriod(tx *gorm.DB, orgID, employeeID, period string, asOf time.Time) ([]TimeEntry, error) {
 	start, err := time.ParseInLocation(PeriodLayout, period, asOf.Location())
 	if err != nil {
-		return 0, fmt.Errorf("invalid period %q: %w", period, err)
+		return nil, fmt.Errorf("invalid period %q: %w", period, err)
 	}
 	end := start.AddDate(0, 1, 0)
 
@@ -131,14 +148,28 @@ func SumApprovedMinutes(tx *gorm.DB, orgID, employeeID, period string, asOf time
 		upperExclusive = end
 	}
 
-	var total int64
-	err = tx.Model(&TimeEntry{}).
-		Where("organization_id = ? AND employee_id = ? AND status = ?", orgID, employeeID, TimeEntryApproved).
+	var entries []TimeEntry
+	err = tx.Where("organization_id = ? AND employee_id = ? AND status = ?", orgID, employeeID, TimeEntryApproved).
 		Where("work_date >= ? AND work_date < ?", start, upperExclusive).
-		Select("COALESCE(SUM(minutes_worked), 0)").
-		Scan(&total).Error
+		Order("work_date ASC, id ASC").
+		Find(&entries).Error
+	if err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+// SumApprovedMinutes totals approved minutes worked by an employee within
+// `period`, counting only entries on or before asOf — see
+// ApprovedEntriesForPeriod for the period-boundary rules.
+func SumApprovedMinutes(tx *gorm.DB, orgID, employeeID, period string, asOf time.Time) (int64, error) {
+	entries, err := ApprovedEntriesForPeriod(tx, orgID, employeeID, period, asOf)
 	if err != nil {
 		return 0, err
+	}
+	var total int64
+	for _, e := range entries {
+		total += int64(e.MinutesWorked)
 	}
 	return total, nil
 }

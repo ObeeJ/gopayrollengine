@@ -44,10 +44,12 @@ func SetupRouter() *gin.Engine {
 	workerAuthHandler := handlers.NewWorkerAuthHandler(userRepo, empRepo)
 	ewaService := services.NewEWAService()
 	empHandler := handlers.NewEmployeeHandler(empRepo, ewaService)
-	payrollHandler := &handlers.PayrollHandler{Service: services.NewPayrollService(payrollRepo, empRepo)}
+	payrollService := services.NewPayrollService(payrollRepo, empRepo)
+	payrollHandler := &handlers.PayrollHandler{Service: payrollService}
 	analyticsHandler := &handlers.AnalyticsHandler{Service: services.NewAnalyticsService(payrollRepo, empRepo)}
 	advanceHandler := handlers.NewAdvanceHandler(ewaService)
 	policyHandler := handlers.NewPolicyHandler(ewaService)
+	payrollPolicyHandler := handlers.NewPayrollPolicyHandler(payrollService)
 	timeEntryHandler := handlers.NewTimeEntryHandler(services.NewTimeEntryService())
 	fundingHandler := handlers.NewFundingHandler(services.NewFundingService(monnify.NewClient()))
 	webhookHandler := &handlers.WebhookHandler{}
@@ -132,6 +134,12 @@ func SetupRouter() *gin.Engine {
 			{
 				policy.GET("/", policyHandler.GetPolicy)
 				policy.PUT("/", middleware.RequireRole("admin"), policyHandler.UpdatePolicy)
+			}
+
+			payrollPolicy := employer.Group("/payroll-policy")
+			{
+				payrollPolicy.GET("/", payrollPolicyHandler.GetPayrollPolicy)
+				payrollPolicy.PUT("/", middleware.RequireRole("admin"), payrollPolicyHandler.UpdatePayrollPolicy)
 			}
 		}
 

@@ -40,7 +40,7 @@ func TestAccrualSnapshotCollector_SnapshotsHourlyEmployee(t *testing.T) {
 	teSvc := NewTimeEntryService()
 	now := time.Now()
 
-	approved, err := teSvc.SubmitTimeEntry(context.Background(), orgID, employeeID, now, 240, "")
+	approved, err := teSvc.SubmitTimeEntry(context.Background(), orgID, employeeID, now, 240, models.ShiftRegular, "")
 	require.NoError(t, err)
 	_, err = teSvc.ApproveTimeEntry(context.Background(), orgID, approved.ID, "admin", "127.0.0.1")
 	require.NoError(t, err)

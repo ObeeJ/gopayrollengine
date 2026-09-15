@@ -3,11 +3,13 @@ package api
 import (
 	"go-payroll-engine/internal/api/handlers"
 	"go-payroll-engine/internal/api/middleware"
+	"go-payroll-engine/internal/integrations/banklink"
 	"go-payroll-engine/internal/integrations/monnify"
 	"go-payroll-engine/internal/models"
 	"go-payroll-engine/internal/repository"
 	"go-payroll-engine/internal/services"
 	"go-payroll-engine/internal/workers"
+	"os"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -172,6 +174,24 @@ func SetupRouter() *gin.Engine {
 			worker.GET("/bill-timing", advanceHandler.GetBillTiming)
 			worker.POST("/time-entries", timeEntryHandler.SubmitTimeEntry)
 			worker.GET("/time-entries", timeEntryHandler.GetTimeEntries)
+
+			// D2C bank-link + debit-mandate — only registered under
+			// MOCK_MODE. There's no real aggregator (Mono/Okra) wired to
+			// banklink.DebitProvider yet, and exposing a Mock-backed
+			// linking flow to a real user in production would let them
+			// "link" an account and get back canned success — the same
+			// reason cmd/api/main.go's collect-d2c-debits mode refuses to
+			// run outside MOCK_MODE. Remove this gate only once a real
+			// provider replaces banklink.NewMock() below.
+			if os.Getenv("MOCK_MODE") == "true" {
+				d2cBankLinkHandler := handlers.NewD2CBankLinkHandler(banklink.NewMock())
+				d2cBankLink := worker.Group("/d2c/bank-link")
+				{
+					d2cBankLink.POST("/initiate", d2cBankLinkHandler.InitiateLink)
+					d2cBankLink.POST("/complete", d2cBankLinkHandler.CompleteLink)
+					d2cBankLink.POST("/authorize-debit", d2cBankLinkHandler.AuthorizeDebit)
+				}
+			}
 		}
 	}
 

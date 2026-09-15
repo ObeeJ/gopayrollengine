@@ -55,6 +55,7 @@ func SetupRouter() *gin.Engine {
 	webhookHandler := &handlers.WebhookHandler{}
 	consentHandler := &handlers.ConsentHandler{}
 	complianceHandler := &handlers.ComplianceHandler{}
+	d2cHandler := &handlers.D2CHandler{}
 	dashboardHandler := handlers.NewDashboardHandler(services.NewEmployerDashboardService(empRepo))
 
 	v1 := r.Group("/api/v1")
@@ -79,6 +80,10 @@ func SetupRouter() *gin.Engine {
 		// signature verification either; see D2CDebitWebhookPayload's doc
 		// comment. Add one before wiring this to a live provider.
 		v1.POST("/webhooks/d2c-debit-collection", webhookHandler.HandleD2CDebitWebhook)
+
+		// D2C signup — public, same posture as /auth/login and
+		// /worker/auth/login: there is no identity yet to gate this behind.
+		v1.POST("/d2c/signup", d2cHandler.Signup)
 
 		// Employer routes — JWT → tenant → residency → employer gate → role gate.
 		employer := v1.Group("/")

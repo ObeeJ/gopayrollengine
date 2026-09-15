@@ -413,20 +413,47 @@ more of the same. That is where the actual differentiation is:
     for advances whose prediction has actually arrived; that CLI mode
     currently refuses to run outside `MOCK_MODE`, since no real banklink
     provider exists yet to run it against in production.
+  - ~~D2C self-serve signup~~ — done. `POST /api/v1/d2c/signup`
+    (`D2CHandler.Signup`) is public, the same posture as `/auth/login` and
+    `/worker/auth/login` — there is no identity yet to gate it behind. It
+    creates the `Organization` (`IsD2C: true`), the worker's own `Employee`
+    record, and their `User` login identity in one transaction, records
+    their acceptance of the D2C repayment disclosure as a `ConsentRecord`
+    (`d2c_direct_debit_disclosure` — separate from the bank-link-read and
+    debit-mandate consents that still belong at the linking step, not
+    signup, since no account has been chosen yet), applies the same
+    currency-driven BVN/KYC rule `CreateEmployee` already applies to an
+    employer-created employee, and returns a worker JWT directly rather than
+    requiring a separate OTP login immediately after — there is no prior
+    identity for a first-time signup to authenticate against otherwise.
+    Building this surfaced a real, previously-dormant bug: migration 000002
+    added `organizations.password_hash`/`role`/`is_active` via `CREATE TABLE
+    IF NOT EXISTS organizations (...)`, but migration 000001 had already
+    created that table without them, so 000002's own `CREATE TABLE` was a
+    silent no-op — those columns have never actually existed on any
+    database that ran migrations from a clean state, dev and CI included.
+    Nothing surfaced it because every `Organization` row anywhere in this
+    codebase, tests included, is created via a raw SQL `INSERT` that never
+    touches `password_hash` — D2C signup is the first caller that creates
+    one through the GORM model itself. Fixed by migration 000032
+    (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, not an edit to 000002 —
+    once shipped, a migration is never rewritten).
   - Still to build: a real aggregator (Mono/Okra) wired to
     `banklink.DebitProvider` (no vendor credential or API spec was available
     to integrate against honestly — `Mock` is the only implementation so
     far), signature verification on `HandleD2CDebitWebhook` (placeholder
     payload shape today, since there's no real provider's format to verify
-    against), D2C self-serve signup (there is currently no API that creates
-    an `Organization` at all — every existing org is ops-created),
-    D2C-specific consent/disclosure at signup (both for linking an account
-    to read AND for authorizing it to be debited — two separate consents,
-    per this section's own design), and eligibility computed from predicted
-    income (`PredictNextPayday`'s output) rather than payroll accrual — an
-    `EWAAdvance` can be requested for a D2C worker today, but its
-    eligibility cap still comes from the payroll-shaped accrual logic, which
-    doesn't mean anything for a worker with no payroll relationship.
+    against), the bank-link-read and debit-mandate-authorization endpoints
+    themselves (`banklink.Provider.InitiateLink`/`CompleteLink` and
+    `DebitProvider.AuthorizeDebitMandate` exist at the service layer and are
+    exercised in tests, but nothing in `routes.go` exposes them yet — that's
+    also blocked on having a real provider worth linking to in production,
+    the same reason `collect-d2c-debits` stays `MOCK_MODE`-gated), and
+    eligibility computed from predicted income (`PredictNextPayday`'s
+    output) rather than payroll accrual — an `EWAAdvance` can be requested
+    for a D2C worker today, but its eligibility cap still comes from the
+    payroll-shaped accrual logic, which doesn't mean anything for a worker
+    with no payroll relationship.
 
 ---
 

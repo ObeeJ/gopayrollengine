@@ -49,6 +49,14 @@ a concurrent request cannot race past one checked a moment earlier.
   earned; the exact figure settles at payroll time regardless. Don't wire
   ComputeHourlyGross into eligibility without deciding whether an EWA draw
   should be able to anticipate an overtime premium that hasn't happened yet.
+- `accruedHourlyToDateTx` also stays period-scoped (`ApprovedEntriesForPeriod`)
+  even though payroll no longer is: `ComputeHourlyGross` sweeps unpaid
+  approved entries from ANY earlier period too (`UnpaidApprovedEntriesThrough`,
+  migration 000028 — `time_entries.paid_payroll_item_id`), so a late-approved
+  entry from last period still gets paid by whichever run catches it. That
+  sweep is a payroll-gross concern, not an eligibility one — don't wire it in
+  without deciding whether accrual should count wages from a period whose
+  payroll has already run.
 - Advances settle by netting out of the next payroll item, inside the payroll
   creation transaction (`SettleAdvancesForPayrollItem`). An advance that does not
   settle is money the business never recovers.

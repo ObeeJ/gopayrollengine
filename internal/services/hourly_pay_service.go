@@ -29,6 +29,12 @@ type HourlyPayBreakdown struct {
 	OvertimePremiumKobo money.Kobo
 	// GrossKobo is BaseKobo + OvertimePremiumKobo.
 	GrossKobo money.Kobo
+
+	// EntryIDs are every TimeEntry this breakdown paid for — regular AND
+	// overtime, from this period and any earlier one swept in. The caller
+	// must pass these to models.MarkTimeEntriesPaid in the same transaction
+	// that creates the payroll item, or they will be paid again next run.
+	EntryIDs []string
 }
 
 // payrollPolicyTx loads the org's PayrollPolicy, falling back to the default
@@ -67,15 +73,18 @@ type isoWeekKey struct {
 //     ADDITIONAL premium — never a replacement for the shift differential —
 //     on just the overtime portion.
 //
-// Entries are processed oldest-first (see ApprovedEntriesForPeriod) so an
-// entry that straddles the threshold is split proportionally between regular
-// and overtime.
+// Entries are processed oldest-first (see UnpaidApprovedEntriesThrough) so
+// an entry that straddles the threshold is split proportionally between
+// regular and overtime.
 //
-// Weekly attribution is scoped to this period's entries only: a week
-// spanning a period boundary is attributed independently in each period's
-// run, the same boundary tradeoff SumApprovedMinutes already accepts for
-// monthly accrual. See docs/EWA_ROADMAP.md Phase 5's next item for sweeping
-// late-approved entries; this function does not attempt to fix that here.
+// Entries are never scoped to just this period: an approved entry from an
+// earlier period that missed its own period's run (a late approval) is
+// swept into this one instead of being silently dropped — see migration
+// 000028. Because a swept entry's ISO week may have already been partly
+// paid by that earlier run, this seeds each week's running total from
+// PaidMinutesInISOWeek before attributing any of THIS run's minutes, so a
+// late entry in an already-overtime week is still correctly rated as
+// overtime rather than underpaid as regular time.
 func ComputeHourlyGross(
 	tx *gorm.DB, orgID, employeeID, period string, asOf time.Time, hourlyRateKobo money.Kobo,
 ) (HourlyPayBreakdown, error) {
@@ -86,17 +95,28 @@ func ComputeHourlyGross(
 		return result, fmt.Errorf("payroll policy lookup failed: %w", err)
 	}
 
-	entries, err := models.ApprovedEntriesForPeriod(tx, orgID, employeeID, period, asOf)
+	entries, err := models.UnpaidApprovedEntriesThrough(tx, orgID, employeeID, period, asOf)
 	if err != nil {
-		return result, fmt.Errorf("approved entries lookup failed: %w", err)
+		return result, fmt.Errorf("unpaid approved entries lookup failed: %w", err)
 	}
 
 	weekMinutes := map[isoWeekKey]int64{}
+	seededWeeks := map[isoWeekKey]bool{}
 	var baseAmounts, premiumAmounts []money.Kobo
+	entryIDs := make([]string, 0, len(entries))
 
 	for _, entry := range entries {
 		year, week := entry.WorkDate.ISOWeek()
 		key := isoWeekKey{year, week}
+		if !seededWeeks[key] {
+			paid, err := models.PaidMinutesInISOWeek(tx, orgID, employeeID, year, week)
+			if err != nil {
+				return result, fmt.Errorf("paid-minutes lookup for ISO week %d-W%02d failed: %w", year, week, err)
+			}
+			weekMinutes[key] = paid
+			seededWeeks[key] = true
+		}
+		entryIDs = append(entryIDs, entry.ID)
 		minutesWorked := int64(entry.MinutesWorked)
 
 		before := weekMinutes[key]
@@ -163,5 +183,6 @@ func ComputeHourlyGross(
 	result.BaseKobo = base
 	result.OvertimePremiumKobo = premium
 	result.GrossKobo = gross
+	result.EntryIDs = entryIDs
 	return result, nil
 }

@@ -322,9 +322,16 @@ more of the same. That is where the actual differentiation is:
   deliberately keeps using the flat rate rather than this — it only needs to
   stay a conservative floor on wages already earned, and the exact figure is
   settled at payroll time regardless.
-- Still open: payroll only pays whole approved entries closed out before the
-  run — a late approval after payroll has already run for that period is not
-  swept up retroactively.
+- ~~Sweep late-approved timesheet entries into a later payroll run~~ — done:
+  `time_entries.paid_payroll_item_id` (migration 000028) tracks which payroll
+  item actually paid each entry. `services.ComputeHourlyGross` sweeps every
+  approved-but-never-paid entry regardless of which period its work_date
+  falls in, not just entries dated within the period being run — an entry
+  approved after its own period's payroll already went out is picked up by
+  whichever later run catches it, instead of being silently dropped. A swept
+  entry's overtime status correctly accounts for minutes that same ISO week
+  already paid by an earlier run (`PaidMinutesInISOWeek`), so a late approval
+  in an already-overtime week isn't underpaid as regular time.
 - Multi-currency, multi-country
 - Direct-to-consumer (much harder: no payroll deduction, so no recourse-free model)
 

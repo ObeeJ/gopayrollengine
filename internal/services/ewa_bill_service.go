@@ -123,7 +123,7 @@ func (s *EWAService) GetBillTimingPlan(
 			return err
 		}
 		var elErr error
-		el, elErr = s.eligibilityTx(tx, orgID, employeeID, asOf)
+		el, elErr = s.eligibilityTx(ctx, tx, orgID, employeeID, asOf)
 		return elErr
 	})
 	if err != nil {

@@ -21,6 +21,7 @@ package banklink
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"go-payroll-engine/pkg/money"
@@ -60,7 +61,7 @@ type LinkSession struct {
 type LinkedAccount struct {
 	ProviderAccountRef string
 	AccountName        string
-	BankName            string
+	BankName           string
 }
 
 // Provider is the account-linking contract a real aggregator must satisfy.
@@ -83,4 +84,75 @@ type Provider interface {
 	// GetTransactions returns transaction history for a linked account since
 	// the given time — read-only, the only capability this package exposes.
 	GetTransactions(ctx context.Context, providerAccountRef string, since time.Time) ([]Transaction, error)
+}
+
+// DebitStatus is a debit's own account of itself, as of the moment asked —
+// deliberately the same shape as provider.TransferStatus, since a debit is
+// asynchronous for exactly the same reason a payout is: initiating one only
+// means the rail accepted the request, not that funds actually moved.
+// Insufficient funds, a since-revoked mandate, or a closed account are all
+// ordinary outcomes here, not exceptional ones — ConfirmD2CCollection (the
+// caller on the settlement side) must wait for this, never infer success
+// from acceptance alone.
+type DebitStatus string
+
+const (
+	DebitStatusPending    DebitStatus = "pending"
+	DebitStatusSuccessful DebitStatus = "successful"
+	DebitStatusFailed     DebitStatus = "failed"
+	DebitStatusUnknown    DebitStatus = "unknown"
+)
+
+// DebitResult is what a provider says at submission time — mirrors
+// provider.TransferResult's own posture: Accepted is a synchronous, definite
+// answer (bad mandate, no such account); a true debit outcome (funds moved
+// or didn't) arrives later via webhook or GetDebitStatus.
+type DebitResult struct {
+	Accepted          bool
+	ProviderReference string
+	Message           string
+}
+
+// Errors a DebitProvider implementation returns for the same failure shape,
+// mirroring package provider's own error identities so callers can branch
+// on error identity rather than provider-specific strings.
+var (
+	// ErrDebitUnavailable — the rail could not be reached. Callers retry
+	// this; it says nothing about whether the debit went through.
+	ErrDebitUnavailable = errors.New("banklink: debit rail unavailable")
+	// ErrNoMandate — asked to debit an account with no authorized mandate.
+	// A caller seeing this from InitiateDebit indicates it skipped
+	// AuthorizeDebitMandate, not routine control flow.
+	ErrNoMandate = errors.New("banklink: no debit mandate authorized for this account")
+)
+
+// DebitProvider is the additional capability a Provider may offer: pulling
+// money FROM a linked account under a standing authorization. Kept as a
+// separate interface from Provider — embedding it rather than folding these
+// methods into Provider itself — so that implementing account linking never
+// implies debit capability by accident; a caller that only needs to read
+// transaction history for payday prediction should never be handed
+// something that can also move money, even if the concrete adapter happens
+// to support both.
+type DebitProvider interface {
+	Provider
+
+	// AuthorizeDebitMandate sets up standing authorization to debit a
+	// linked account later, on the worker's own predicted payday. A
+	// separate, explicit step from linking the account for reading — see
+	// migration 000030 and 000031's comments on why consent to read and
+	// consent to be debited must never be the same consent.
+	AuthorizeDebitMandate(ctx context.Context, providerAccountRef string) (mandateRef string, err error)
+
+	// InitiateDebit pulls amount from an account under an existing mandate.
+	// Reference is our own identifier (a d2c_debit_collections row ID),
+	// used the same way provider.TransferRequest.Reference is: as the
+	// provider-side idempotency key wherever the rail supports one, so a
+	// retried submission cannot double-debit.
+	InitiateDebit(ctx context.Context, mandateRef string, amount money.Money, reference string) (DebitResult, error)
+
+	// GetDebitStatus polls the rail for a debit's current status, keyed by
+	// the ProviderReference InitiateDebit returned. A fallback path when a
+	// webhook is late or lost — never the primary confirmation mechanism.
+	GetDebitStatus(ctx context.Context, providerReference string) (DebitStatus, error)
 }

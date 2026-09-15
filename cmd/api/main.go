@@ -5,6 +5,7 @@ import (
 	"go-payroll-engine/internal/api"
 	"go-payroll-engine/internal/api/middleware"
 	"go-payroll-engine/internal/config"
+	"go-payroll-engine/internal/integrations/banklink"
 	"go-payroll-engine/internal/integrations/monnify"
 	"go-payroll-engine/internal/models"
 	"go-payroll-engine/internal/services"
@@ -83,6 +84,27 @@ func main() {
 		}
 		if run.Alerted {
 			log.Printf("reconciliation ALERTED: drift=%v", *run.DriftKobo)
+		}
+	case "collect-d2c-debits":
+		// Wire this to a daily cron too, once a real banklink debit provider
+		// exists — no live aggregator is wired yet (see
+		// internal/integrations/banklink's package doc), so this mode only
+		// runs under MOCK_MODE, the same guard that keeps mock money out of
+		// production everywhere else in this file.
+		if os.Getenv("MOCK_MODE") != "true" {
+			log.Fatal("collect-d2c-debits: no real banklink debit provider is wired yet — refusing to run outside MOCK_MODE")
+		}
+		results, err := services.SweepD2CCollections(context.Background(), time.Now(), banklink.NewMock())
+		if err != nil {
+			log.Fatal("D2C debit collection sweep failed:", err)
+		}
+		for _, r := range results {
+			switch {
+			case r.Err != nil:
+				log.Printf("D2C collection for advance %s: %v", r.AdvanceID, r.Err)
+			case r.Collection != nil:
+				log.Printf("D2C collection initiated for advance %s: collection %s", r.AdvanceID, r.Collection.ID)
+			}
 		}
 	default:
 		startAPI(cfg.Port)

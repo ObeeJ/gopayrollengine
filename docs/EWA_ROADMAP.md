@@ -382,15 +382,51 @@ more of the same. That is where the actual differentiation is:
     without counsel confirming what recourse + a predicted-payday direct
     debit does to this product's regulatory classification** — see §7's new
     note below.
-  - Still to build: the debit-collection provider capability itself (a real
-    `AuthorizeDebitMandate`/`InitiateDebit` addition to `banklink.Provider`),
-    D2C self-serve signup (there is currently no API that creates an
-    `Organization` at all — every existing org is ops-created), D2C-specific
-    consent/disclosure at signup, eligibility computed from predicted income
-    rather than payroll accrual, and the settlement path itself (debit
-    success → ledger entries, debit failure → retry/grace/write-off, none of
-    which is `SettleAdvancesForPayrollItem`, which is payroll-triggered and
-    doesn't apply here).
+  - ~~Debit-collection capability + settlement path~~ — done.
+    `banklink.DebitProvider` (embeds `Provider`) adds
+    `AuthorizeDebitMandate`/`InitiateDebit`/`GetDebitStatus` as a
+    **separate** interface, not folded into `Provider` — so a caller that
+    only needs read access for payday prediction is never handed something
+    that can also move money, even where a concrete adapter supports both.
+    `d2c_bank_links.debit_mandate_ref` (migration 000031) is set only once a
+    worker explicitly authorizes a linked account to be debited — a second,
+    later, separate consent from linking the account to read it.
+    `d2c_debit_collections` is one row per collection *attempt* (not per
+    advance), the same append-only attempt history this codebase keeps
+    everywhere else money moves. `services.InitiateD2CCollection` submits a
+    debit for an advance's outstanding balance and — mirroring
+    `EWADisbursementHandler`'s own acceptance-vs-confirmation split exactly
+    — does not settle anything on mere acceptance; `models
+    .ConfirmD2CCollectionSuccess`/`Failure`, driven by
+    `HandleD2CDebitWebhook`, do that once the provider actually confirms the
+    outcome: success posts Dr `cash_settlement` / Cr `advance_receivable`
+    (the direct analogue of `SettleAdvancesForPayrollItem`'s own posting)
+    and settles the advance once fully recovered; failure is an ordinary,
+    expected outcome (insufficient funds on the predicted day) that leaves
+    the advance `Disbursed` for a later retry, up to `maxD2CCollectionAttempts`
+    (4), past which the advance is written off exactly the way a terminated
+    employee's undischarged advance already is.
+    `services.SweepD2CCollections` (wired to `collect-d2c-debits` in
+    `cmd/api/main.go`, the same external-cron pattern
+    `AccrualSnapshotCollector`/`ReconciliationJob` already use) re-predicts
+    every D2C worker's payday fresh each run and initiates a collection only
+    for advances whose prediction has actually arrived; that CLI mode
+    currently refuses to run outside `MOCK_MODE`, since no real banklink
+    provider exists yet to run it against in production.
+  - Still to build: a real aggregator (Mono/Okra) wired to
+    `banklink.DebitProvider` (no vendor credential or API spec was available
+    to integrate against honestly — `Mock` is the only implementation so
+    far), signature verification on `HandleD2CDebitWebhook` (placeholder
+    payload shape today, since there's no real provider's format to verify
+    against), D2C self-serve signup (there is currently no API that creates
+    an `Organization` at all — every existing org is ops-created),
+    D2C-specific consent/disclosure at signup (both for linking an account
+    to read AND for authorizing it to be debited — two separate consents,
+    per this section's own design), and eligibility computed from predicted
+    income (`PredictNextPayday`'s output) rather than payroll accrual — an
+    `EWAAdvance` can be requested for a D2C worker today, but its
+    eligibility cap still comes from the payroll-shaped accrual logic, which
+    doesn't mean anything for a worker with no payroll relationship.
 
 ---
 

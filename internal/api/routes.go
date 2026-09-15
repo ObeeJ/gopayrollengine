@@ -75,6 +75,11 @@ func SetupRouter() *gin.Engine {
 		// Monnify webhook — HMAC-verified, no JWT needed.
 		v1.POST("/webhooks/monnify", webhookHandler.HandleMonnifyWebhook)
 
+		// D2C debit-collection webhook — no real aggregator wired yet, so no
+		// signature verification either; see D2CDebitWebhookPayload's doc
+		// comment. Add one before wiring this to a live provider.
+		v1.POST("/webhooks/d2c-debit-collection", webhookHandler.HandleD2CDebitWebhook)
+
 		// Employer routes — JWT → tenant → residency → employer gate → role gate.
 		employer := v1.Group("/")
 		employer.Use(middleware.JWTAuth())

@@ -181,6 +181,18 @@ func NGNFromKobo(k Kobo) Money {
 	return Money{Minor: int64(k), Currency: NGN}
 }
 
+// KoboIn is NGNFromKobo's currency-general counterpart, for organisations
+// whose operating currency isn't NGN. Employee salary, payroll amounts, and
+// EWA advance amounts are all still stored as bare Kobo (a minor-unit
+// integer) regardless of which org they belong to — see models.Organization
+// .Currency for why that column, not this type, is where currency lives for
+// those paths. This is the bridge at the one boundary that must know it: the
+// ledger, which every other party in this system trusts to keep currencies
+// straight.
+func KoboIn(c Currency, k Kobo) Money {
+	return Money{Minor: int64(k), Currency: c}
+}
+
 // Kobo narrows a Money back to the NGN-only type, refusing other currencies.
 func (m Money) Kobo() (Kobo, error) {
 	if m.Currency != NGN {

@@ -332,7 +332,23 @@ more of the same. That is where the actual differentiation is:
   entry's overtime status correctly accounts for minutes that same ISO week
   already paid by an earlier run (`PaidMinutesInISOWeek`), so a late approval
   in an already-overtime week isn't underpaid as regular time.
-- Multi-currency, multi-country
+- ~~Multi-currency, multi-country~~ — foundation done: `Organization.Currency`
+  (migration 000029, immutable after creation — a DB trigger rejects any
+  UPDATE) is now the single source of truth every ledger posting, EWA policy
+  default, and disbursement decision keys off, rather than an implicit NGN.
+  `models.OrgCurrencyTx` resolves it wherever a ledger entry is posted;
+  `DefaultEWAPolicy` picks currency-appropriate (illustrative, not FX-derived)
+  starting amounts instead of Naira literals; `CreateEmployee` only requires
+  BVN — Nigeria's own KYC check — for an NGN org. `PayrollService.CreatePayroll`
+  refuses, synchronously, to run for a currency no registered provider can
+  settle (`provider.Registry.Select`), rather than queuing a run that can only
+  fail deep inside a worker. What this does NOT yet do: actually disburse a
+  non-NGN payroll or EWA advance — both registered providers (Monnify,
+  Paystack) are NGN-only today, and payroll's bulk-transfer path is Monnify-
+  specific code that doesn't go through the provider abstraction at all (see
+  `payroll_worker.go`'s own comment on why). Bringing on a real non-NGN
+  provider is the next step; everything upstream of "submit the transfer" is
+  now ready for that org's currency to be whatever it actually operates in.
 - Direct-to-consumer (much harder: no payroll deduction, so no recourse-free model)
 
 ---

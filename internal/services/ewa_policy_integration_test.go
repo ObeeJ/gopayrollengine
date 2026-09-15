@@ -27,7 +27,7 @@ func TestGetPolicy_ReturnsDefaultWhenNoneSaved(t *testing.T) {
 
 	policy, err := svc.GetPolicy(context.Background(), orgID)
 	require.NoError(t, err)
-	assert.Equal(t, models.DefaultEWAPolicy(orgID).MaxAccrualPct, policy.MaxAccrualPct)
+	assert.Equal(t, models.DefaultEWAPolicy(orgID, money.NGN).MaxAccrualPct, policy.MaxAccrualPct)
 	assert.False(t, policy.RequireFundingCoverage)
 }
 
@@ -91,7 +91,7 @@ func TestUpdatePolicy_RejectsOutOfRangeValues(t *testing.T) {
 	// None of the rejected updates should have partially applied.
 	policy, err := svc.GetPolicy(context.Background(), orgID)
 	require.NoError(t, err)
-	assert.Equal(t, models.DefaultEWAPolicy(orgID).MaxAccrualPct, policy.MaxAccrualPct)
+	assert.Equal(t, models.DefaultEWAPolicy(orgID, money.NGN).MaxAccrualPct, policy.MaxAccrualPct)
 }
 
 func TestUpdatePolicy_AuditsBeforeAndAfter(t *testing.T) {

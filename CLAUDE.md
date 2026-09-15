@@ -6,6 +6,17 @@ Architecture notes for future Claude sessions. Code is the source of truth; this
 
 Every monetary value is `money.Kobo` (int64 minor units). Never reintroduce float64 for money. `pkg/money/money.go` has `Value()`/`Scan()` for GORM BIGINT persistence and `Naira()`/`FromNaira()` for display + the Monnify wire boundary only. Use `money.Sum([]Kobo)` not `+=` — `Sum` is overflow-checked.
 
+## Currency: Kobo fields are currency-less; the org tells you which currency
+
+`Employee.Salary`, `HourlyRateKobo`, `PayrollItem.Amount`, `EWAAdvance.AmountKobo`, etc. are all still bare `money.Kobo` — a minor-unit integer with no currency of its own. `Organization.Currency` (migration 000029) is what gives that integer meaning: every one of those fields belongs to some org, and that org's currency is what it's denominated in. It's set once at creation (default NGN) and a DB trigger rejects any later UPDATE — changing it out from under an org's existing ledger history would corrupt the ledger's per-account currency invariant (next section), not convert anything.
+
+- `models.OrgCurrencyTx(tx, orgID)` resolves it — call this, don't hardcode `money.NGN`, anywhere you're about to post a ledger entry, pick a default policy amount, or select a payment provider for an org.
+- `money.KoboIn(currency, k)` is `NGNFromKobo`'s general form — the bridge from a Kobo field to the ledger's currency-tagged `Money`, once you know which currency.
+- `provider.Registry.Select(currency)` fails loudly (`ErrNoProviderForCurrency`) if nothing registered can settle it. `PayrollService.CreatePayroll` calls this *before* creating anything, so an org configured with a currency no provider supports gets a clear synchronous error instead of a payroll that queues successfully and then fails deep inside the async worker.
+- Both registered providers (Monnify, Paystack) are NGN-only today, and `payroll_worker.go`'s bulk-transfer path calls Monnify directly rather than through `provider.Registry` (bulk has no equivalent there — see `provider.TransferRequest`'s doc comment on why it's single-recipient only). Its `CurrencyCode: "NGN"` is deliberate, not a bug: `CreatePayroll`'s guard above is what keeps every payroll reaching that worker actually NGN. Don't remove the guard without also giving that worker a real multi-currency disbursement path.
+- BVN is Nigeria's CBN-specific KYC check (migration 000002) — `CreateEmployee` only requires it for an NGN org. Don't make it unconditionally required again; that blocks onboarding for every other currency's employees.
+- `DefaultEWAPolicy(orgID, currency)` picks illustrative, currency-appropriate starting amounts (`defaultEWAPolicyMajorUnits` in `internal/models/ewa.go`) — not derived from live FX. Ops still tunes real numbers per org via `UpdatePolicy`, same as for an NGN org.
+
 ## Tenant isolation: RLS, not WHERE clauses
 
 Every tenant-scoped DB write or read must run inside `models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error { ... })`. The helper opens a transaction and sets `app.org_id` via `set_config(..., true)`; Postgres RLS policies (migrations 000008–000011) then filter rows server-side. A forgotten WHERE clause returns zero rows, not another tenant's data.

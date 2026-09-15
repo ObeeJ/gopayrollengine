@@ -407,7 +407,11 @@ func (h *WebhookHandler) handleFundingWebhook(c *gin.Context, body []byte) {
 	}
 
 	if err := models.WithOrgScope(c.Request.Context(), account.OrganizationID, func(tx *gorm.DB) error {
-		return models.RecordEmployerFunding(tx, account.OrganizationID, money.NGNFromKobo(amountKobo), ref)
+		currency, err := models.OrgCurrencyTx(tx, account.OrganizationID)
+		if err != nil {
+			return err
+		}
+		return models.RecordEmployerFunding(tx, account.OrganizationID, money.KoboIn(currency, amountKobo), ref)
 	}); err != nil {
 		middleware.Logger.Error("employer funding deposit failed",
 			"org_id", account.OrganizationID, "ref", ref, "error", err.Error())

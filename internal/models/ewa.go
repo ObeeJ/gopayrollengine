@@ -117,22 +117,56 @@ type EWAPolicy struct {
 
 func (EWAPolicy) TableName() string { return "ewa_policies" }
 
-// DefaultEWAPolicy — the values an org gets before anyone tunes anything.
+// defaultEWAPolicyMajorUnits are illustrative starting points for
+// AbsoluteCapKobo/MinDrawKobo/EmergencyFloorKobo, in each currency's own
+// MAJOR unit (Naira, Dollars, Cedis, ...) — not derived from a live FX rate.
+// A ₦200,000 cap applied verbatim as "200000 minor units" to a GHS or KES
+// org would be meaningless in that org's own currency; this at least starts
+// a new org's defaults at roughly the right order of magnitude in its own
+// money rather than silently reusing Naira's. Ops still tunes real numbers
+// per org via UpdatePolicy exactly as for an NGN org — these are a starting
+// point, not a considered target.
+var defaultEWAPolicyMajorUnits = map[money.Currency]struct{ cap, min, floor int64 }{
+	money.NGN: {200_000, 1_000, 5_000},
+	money.USD: {500, 5, 20},
+	money.GHS: {3_000, 30, 150},
+	money.KES: {30_000, 300, 1_500},
+	money.ZAR: {4_000, 50, 200},
+	money.XOF: {150_000, 1_500, 7_500},
+	money.GBP: {400, 4, 15},
+	money.EUR: {450, 5, 18},
+}
+
+// DefaultEWAPolicy — the values an org gets before anyone tunes anything, in
+// the org's own operating currency (see Organization.Currency).
 //
 // 30% matches what Nigerian employee cooperatives already offer as a salary
 // advance with payroll recovery, so it lands on a number workers recognise
 // rather than one invented here. It is far easier to loosen a policy after
 // watching real usage than to claw back access people have built a budget on.
-func DefaultEWAPolicy(orgID string) EWAPolicy {
+func DefaultEWAPolicy(orgID string, currency money.Currency) EWAPolicy {
+	amounts, ok := defaultEWAPolicyMajorUnits[currency]
+	if !ok {
+		// Should never happen — the DB CHECK constraint on
+		// organizations.currency (migration 000029) already restricts it to
+		// this exact set — but fall back to NGN's currency too, not just its
+		// amounts: FromMajor below would otherwise fail on the unrecognised
+		// code and silently zero out every default.
+		amounts = defaultEWAPolicyMajorUnits[money.NGN]
+		currency = money.NGN
+	}
+	cap, _ := money.FromMajor(amounts.cap, currency)
+	min, _ := money.FromMajor(amounts.min, currency)
+	floor, _ := money.FromMajor(amounts.floor, currency)
 	return EWAPolicy{
 		OrganizationID:     orgID,
 		Enabled:            true,
 		MaxAccrualPct:      30,
-		AbsoluteCapKobo:    money.FromNaira(200_000),
-		MinDrawKobo:        money.FromNaira(1_000),
+		AbsoluteCapKobo:    money.Kobo(cap.Minor),
+		MinDrawKobo:        money.Kobo(min.Minor),
 		MaxDrawsPerPeriod:  4,
 		CoolingOffHours:    24,
-		EmergencyFloorKobo: money.FromNaira(5_000),
+		EmergencyFloorKobo: money.Kobo(floor.Minor),
 	}
 }
 

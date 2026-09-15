@@ -51,8 +51,13 @@ func (s *EWAService) IssueHardshipGrant(
 			return err
 		}
 
+		currency, err := models.OrgCurrencyTx(tx, orgID)
+		if err != nil {
+			return err
+		}
+
 		if policy.RequireFundingCoverage {
-			exposure, err := models.FundingExposure(tx, orgID, money.NGN)
+			exposure, err := models.FundingExposure(tx, orgID, currency)
 			if err != nil {
 				return err
 			}
@@ -76,11 +81,11 @@ func (s *EWAService) IssueHardshipGrant(
 			return err
 		}
 
-		cash, err := models.EnsureAccount(tx, orgID, "", models.AccountCashSettlement, money.NGN)
+		cash, err := models.EnsureAccount(tx, orgID, "", models.AccountCashSettlement, currency)
 		if err != nil {
 			return err
 		}
-		expense, err := models.EnsureAccount(tx, orgID, "", models.AccountHardshipGrantExpense, money.NGN)
+		expense, err := models.EnsureAccount(tx, orgID, "", models.AccountHardshipGrantExpense, currency)
 		if err != nil {
 			return err
 		}
@@ -91,8 +96,8 @@ func (s *EWAService) IssueHardshipGrant(
 			Reference:      g.ID,
 			IdempotencyKey: "hardship_grant:" + g.ID,
 			Entries: []models.EntryInput{
-				{AccountID: expense.ID, Direction: models.Debit, Amount: money.NGNFromKobo(amount)},
-				{AccountID: cash.ID, Direction: models.Credit, Amount: money.NGNFromKobo(amount)},
+				{AccountID: expense.ID, Direction: models.Debit, Amount: money.KoboIn(currency, amount)},
+				{AccountID: cash.ID, Direction: models.Credit, Amount: money.KoboIn(currency, amount)},
 			},
 		}); err != nil {
 			observability.LedgerImbalanceTotal.WithLabelValues(orgID).Inc()

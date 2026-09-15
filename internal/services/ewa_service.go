@@ -555,11 +555,15 @@ func (s *EWAService) RequestAdvance(
 //	Dr advance_receivable (employee)   money we expect back from payroll
 //	Cr cash_settlement    (org)        money that left
 func (s *EWAService) postAdvanceLedger(tx *gorm.DB, orgID, employeeID string, adv *models.EWAAdvance) error {
-	receivable, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable, money.NGN)
+	currency, err := models.OrgCurrencyTx(tx, orgID)
 	if err != nil {
 		return err
 	}
-	cash, err := models.EnsureAccount(tx, orgID, "", models.AccountCashSettlement, money.NGN)
+	receivable, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable, currency)
+	if err != nil {
+		return err
+	}
+	cash, err := models.EnsureAccount(tx, orgID, "", models.AccountCashSettlement, currency)
 	if err != nil {
 		return err
 	}
@@ -570,8 +574,8 @@ func (s *EWAService) postAdvanceLedger(tx *gorm.DB, orgID, employeeID string, ad
 		Reference:      adv.ID,
 		IdempotencyKey: "ewa_advance:" + adv.ID,
 		Entries: []models.EntryInput{
-			{AccountID: receivable.ID, Direction: models.Debit, Amount: money.NGNFromKobo(adv.AmountKobo)},
-			{AccountID: cash.ID, Direction: models.Credit, Amount: money.NGNFromKobo(adv.AmountKobo)},
+			{AccountID: receivable.ID, Direction: models.Debit, Amount: money.KoboIn(currency, adv.AmountKobo)},
+			{AccountID: cash.ID, Direction: models.Credit, Amount: money.KoboIn(currency, adv.AmountKobo)},
 		},
 	})
 	if err != nil {
@@ -632,11 +636,15 @@ func (s *EWAService) SettleAdvancesForPayrollItem(
 		return money.Zero, nil
 	}
 
-	receivable, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable, money.NGN)
+	currency, err := models.OrgCurrencyTx(tx, orgID)
 	if err != nil {
 		return 0, err
 	}
-	payable, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountWagePayable, money.NGN)
+	receivable, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountAdvanceReceivable, currency)
+	if err != nil {
+		return 0, err
+	}
+	payable, err := models.EnsureAccount(tx, orgID, employeeID, models.AccountWagePayable, currency)
 	if err != nil {
 		return 0, err
 	}
@@ -683,8 +691,8 @@ func (s *EWAService) SettleAdvancesForPayrollItem(
 			// a no-op.
 			IdempotencyKey: "ewa_settlement:" + adv.ID + ":" + payrollItemID,
 			Entries: []models.EntryInput{
-				{AccountID: payable.ID, Direction: models.Debit, Amount: money.NGNFromKobo(portion)},
-				{AccountID: receivable.ID, Direction: models.Credit, Amount: money.NGNFromKobo(portion)},
+				{AccountID: payable.ID, Direction: models.Debit, Amount: money.KoboIn(currency, portion)},
+				{AccountID: receivable.ID, Direction: models.Credit, Amount: money.KoboIn(currency, portion)},
 			},
 		}); err != nil {
 			observability.LedgerImbalanceTotal.WithLabelValues(orgID).Inc()
@@ -815,7 +823,8 @@ func (s *EWAService) SetProtectedPayday(
 	return result, err
 }
 
-// policyTx loads the org's policy, falling back to the conservative default.
+// policyTx loads the org's policy, falling back to the conservative default
+// in the org's own operating currency.
 func (s *EWAService) policyTx(tx *gorm.DB, orgID string) (*models.EWAPolicy, error) {
 	var policy models.EWAPolicy
 	err := tx.First(&policy, "organization_id = ?", orgID).Error
@@ -825,7 +834,11 @@ func (s *EWAService) policyTx(tx *gorm.DB, orgID string) (*models.EWAPolicy, err
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
 	}
-	def := models.DefaultEWAPolicy(orgID)
+	currency, err := models.OrgCurrencyTx(tx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	def := models.DefaultEWAPolicy(orgID, currency)
 	return &def, nil
 }
 

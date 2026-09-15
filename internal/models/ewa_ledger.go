@@ -35,11 +35,15 @@ func CancelAdvance(tx *gorm.DB, adv *EWAAdvance, from AdvanceStatus, reason stri
 		return err
 	}
 
-	receivable, err := EnsureAccount(tx, adv.OrganizationID, adv.EmployeeID, AccountAdvanceReceivable, money.NGN)
+	currency, err := OrgCurrencyTx(tx, adv.OrganizationID)
 	if err != nil {
 		return err
 	}
-	cash, err := EnsureAccount(tx, adv.OrganizationID, "", AccountCashSettlement, money.NGN)
+	receivable, err := EnsureAccount(tx, adv.OrganizationID, adv.EmployeeID, AccountAdvanceReceivable, currency)
+	if err != nil {
+		return err
+	}
+	cash, err := EnsureAccount(tx, adv.OrganizationID, "", AccountCashSettlement, currency)
 	if err != nil {
 		return err
 	}
@@ -50,8 +54,8 @@ func CancelAdvance(tx *gorm.DB, adv *EWAAdvance, from AdvanceStatus, reason stri
 		Reference:      adv.ID,
 		IdempotencyKey: "ewa_cancellation:" + adv.ID,
 		Entries: []EntryInput{
-			{AccountID: cash.ID, Direction: Debit, Amount: money.NGNFromKobo(adv.AmountKobo)},
-			{AccountID: receivable.ID, Direction: Credit, Amount: money.NGNFromKobo(adv.AmountKobo)},
+			{AccountID: cash.ID, Direction: Debit, Amount: money.KoboIn(currency, adv.AmountKobo)},
+			{AccountID: receivable.ID, Direction: Credit, Amount: money.KoboIn(currency, adv.AmountKobo)},
 		},
 	}); err != nil {
 		observability.LedgerImbalanceTotal.WithLabelValues(adv.OrganizationID).Inc()
@@ -81,11 +85,15 @@ func WriteOffAdvance(tx *gorm.DB, adv *EWAAdvance, reason string) error {
 		return err
 	}
 
-	receivable, err := EnsureAccount(tx, adv.OrganizationID, adv.EmployeeID, AccountAdvanceReceivable, money.NGN)
+	currency, err := OrgCurrencyTx(tx, adv.OrganizationID)
 	if err != nil {
 		return err
 	}
-	writeOff, err := EnsureAccount(tx, adv.OrganizationID, "", AccountWriteOffExpense, money.NGN)
+	receivable, err := EnsureAccount(tx, adv.OrganizationID, adv.EmployeeID, AccountAdvanceReceivable, currency)
+	if err != nil {
+		return err
+	}
+	writeOff, err := EnsureAccount(tx, adv.OrganizationID, "", AccountWriteOffExpense, currency)
 	if err != nil {
 		return err
 	}
@@ -96,8 +104,8 @@ func WriteOffAdvance(tx *gorm.DB, adv *EWAAdvance, reason string) error {
 		Reference:      adv.ID,
 		IdempotencyKey: "ewa_write_off:" + adv.ID,
 		Entries: []EntryInput{
-			{AccountID: writeOff.ID, Direction: Debit, Amount: money.NGNFromKobo(adv.AmountKobo)},
-			{AccountID: receivable.ID, Direction: Credit, Amount: money.NGNFromKobo(adv.AmountKobo)},
+			{AccountID: writeOff.ID, Direction: Debit, Amount: money.KoboIn(currency, adv.AmountKobo)},
+			{AccountID: receivable.ID, Direction: Credit, Amount: money.KoboIn(currency, adv.AmountKobo)},
 		},
 	}); err != nil {
 		observability.LedgerImbalanceTotal.WithLabelValues(adv.OrganizationID).Inc()

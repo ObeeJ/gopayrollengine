@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go-payroll-engine/internal/integrations/provider"
 	"go-payroll-engine/internal/models"
 	"go-payroll-engine/internal/repository"
 	"go-payroll-engine/internal/workers"
@@ -19,11 +20,17 @@ type PayrollService struct {
 	payrollRepo  repository.PayrollRepository
 	employeeRepo repository.EmployeeRepository
 	ewa          *EWAService
+	providers    *provider.Registry
 }
 
 // NewPayrollService — wires up the service with its repository dependencies.
 func NewPayrollService(pr repository.PayrollRepository, er repository.EmployeeRepository) *PayrollService {
-	return &PayrollService{payrollRepo: pr, employeeRepo: er, ewa: NewEWAService()}
+	return &PayrollService{
+		payrollRepo:  pr,
+		employeeRepo: er,
+		ewa:          NewEWAService(),
+		providers:    workers.DefaultProviderRegistry(),
+	}
 }
 
 // CreatePayroll builds and persists the batch under the org's RLS scope, then queues it for the worker.
@@ -35,6 +42,21 @@ func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string
 	}
 
 	err := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
+		// Fail now, synchronously, rather than queuing a run the async worker
+		// can only ever fail deep inside a Monnify bulk-transfer call: the
+		// worker's disbursement path is Monnify-specific and Monnify only
+		// settles NGN, so an org configured with any other currency has no
+		// provider that can actually pay this out yet. See provider.Registry's
+		// own doc comment — silently falling back to some other currency's
+		// rail would move money through one that cannot pay it out.
+		currency, err := models.OrgCurrencyTx(tx, orgID)
+		if err != nil {
+			return err
+		}
+		if _, err := s.providers.Select(currency); err != nil {
+			return fmt.Errorf("payroll: %w", err)
+		}
+
 		employees, err := s.employeeRepo.WithTx(tx).FindAllActive(orgID)
 		if err != nil {
 			return err

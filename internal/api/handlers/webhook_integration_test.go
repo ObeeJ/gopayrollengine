@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"go-payroll-engine/internal/models"
+	"go-payroll-engine/internal/workers"
 	"go-payroll-engine/pkg/money"
 
 	"github.com/gin-gonic/gin"
@@ -27,7 +28,10 @@ import (
 
 // TestMain bootstraps encryption and wires the global models.DB to the test
 // database. The webhook handler still reads models.DB directly (architectural
-// debt), so this test must mirror that wiring.
+// debt), so this test must mirror that wiring. Also wires a real Asynq
+// client: CreateEmployee enqueues BVN verification synchronously within the
+// request, and without a client that call panics on a nil receiver rather
+// than returning an error the handler could log and continue past.
 func TestMain(m *testing.M) {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
@@ -41,6 +45,8 @@ func TestMain(m *testing.M) {
 	models.InitEncryption()
 	gin.SetMode(gin.TestMode)
 	os.Setenv("MONNIFY_SECRET_KEY", "test-webhook-secret")
+	workers.InitAsynqClient()
+	defer workers.CloseAsynqClient()
 	os.Exit(m.Run())
 }
 

@@ -438,22 +438,28 @@ more of the same. That is where the actual differentiation is:
     one through the GORM model itself. Fixed by migration 000032
     (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, not an edit to 000002 —
     once shipped, a migration is never rewritten).
+  - ~~Bank-link-read and debit-mandate-authorization endpoints~~ — done.
+    `POST /api/v1/worker/d2c/bank-link/{initiate,complete,authorize-debit}`
+    (`D2CBankLinkHandler`) wrap `banklink.Provider.InitiateLink`/
+    `CompleteLink` and `DebitProvider.AuthorizeDebitMandate`, each recording
+    its own separate `ConsentRecord` (`d2c_bank_link_read` on complete,
+    `d2c_debit_mandate` on authorize — never the same consent, per this
+    section's own design). Registered only when `MOCK_MODE=true`
+    (`routes.go`) — the same guard `collect-d2c-debits` already uses,
+    because exposing a `Mock`-backed linking flow to a real user in
+    production would hand them back a canned "success" for an account that
+    was never actually linked to anything. Remove that guard only once a
+    real `banklink.DebitProvider` replaces `banklink.NewMock()` there.
   - Still to build: a real aggregator (Mono/Okra) wired to
     `banklink.DebitProvider` (no vendor credential or API spec was available
     to integrate against honestly — `Mock` is the only implementation so
     far), signature verification on `HandleD2CDebitWebhook` (placeholder
     payload shape today, since there's no real provider's format to verify
-    against), the bank-link-read and debit-mandate-authorization endpoints
-    themselves (`banklink.Provider.InitiateLink`/`CompleteLink` and
-    `DebitProvider.AuthorizeDebitMandate` exist at the service layer and are
-    exercised in tests, but nothing in `routes.go` exposes them yet — that's
-    also blocked on having a real provider worth linking to in production,
-    the same reason `collect-d2c-debits` stays `MOCK_MODE`-gated), and
-    eligibility computed from predicted income (`PredictNextPayday`'s
-    output) rather than payroll accrual — an `EWAAdvance` can be requested
-    for a D2C worker today, but its eligibility cap still comes from the
-    payroll-shaped accrual logic, which doesn't mean anything for a worker
-    with no payroll relationship.
+    against), and eligibility computed from predicted income
+    (`PredictNextPayday`'s output) rather than payroll accrual — an
+    `EWAAdvance` can be requested for a D2C worker today, but its
+    eligibility cap still comes from the payroll-shaped accrual logic, which
+    doesn't mean anything for a worker with no payroll relationship.
 
 ---
 

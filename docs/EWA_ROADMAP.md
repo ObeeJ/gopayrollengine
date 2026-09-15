@@ -349,7 +349,48 @@ more of the same. That is where the actual differentiation is:
   `payroll_worker.go`'s own comment on why). Bringing on a real non-NGN
   provider is the next step; everything upstream of "submit the transfer" is
   now ready for that org's currency to be whatever it actually operates in.
-- Direct-to-consumer (much harder: no payroll deduction, so no recourse-free model)
+- Direct-to-consumer — in progress, built incrementally (this is the largest
+  item on the roadmap; treated as several PRs, not one):
+  - ~~Bank-link data model + payday prediction~~ — done. `Organization.IsD2C`
+    (migration 000030) flags a worker onboarded with no employer running
+    payroll for them — modelled as a single-employee organization, the same
+    tenant/RLS boundary every other table already assumes, rather than a
+    parallel non-RLS'd identity system (every existing table — `User`,
+    `Employee`, RLS policies, ledger account identity, JWT claims — turned
+    out to structurally require an `organization_id`; reusing that shape was
+    far lower-risk than inventing a new one). `internal/integrations/banklink`
+    defines the account-linking contract (read-only: link, fetch transaction
+    history — no debit capability yet, deliberately, so linking an account
+    for eligibility can never accidentally imply authorization to move money
+    out of it) with a `Mock` implementation; no real aggregator (Mono, Okra)
+    is wired yet — there's no vendor credential or spec available to
+    integrate against honestly. `services.PredictNextPayday` is the actual
+    novel piece: a pure function that clusters observed deposits by amount
+    similarity, checks the intervals between occurrences in the largest
+    cluster for consistency within a plausible pay cadence, and either
+    returns a confident prediction or `ErrInsufficientPaydayHistory` — never
+    a guess. See `d2c_bank_links`' migration comment for why it stores only
+    a provider account reference, never transaction data or balances.
+  - **⚠️ Regulatory posture, unresolved:** D2C's repayment mechanism is
+    direct debit from the worker's own bank account on their predicted
+    payday — real recourse and a real collections relationship, unlike the
+    org-funded model, whose entire "structurally not lending" argument in §7
+    rests on recovery being payroll-deduction-only with **no** recourse to
+    the worker. D2C is being kept as an explicitly distinct, separately
+    flagged product line (`Organization.IsD2C`) for exactly this reason, but
+    that flag is a code marker, not a legal opinion. **Do not launch D2C
+    without counsel confirming what recourse + a predicted-payday direct
+    debit does to this product's regulatory classification** — see §7's new
+    note below.
+  - Still to build: the debit-collection provider capability itself (a real
+    `AuthorizeDebitMandate`/`InitiateDebit` addition to `banklink.Provider`),
+    D2C self-serve signup (there is currently no API that creates an
+    `Organization` at all — every existing org is ops-created), D2C-specific
+    consent/disclosure at signup, eligibility computed from predicted income
+    rather than payroll accrual, and the settlement path itself (debit
+    success → ledger entries, debit failure → retry/grace/write-off, none of
+    which is `SettleAdvancesForPayrollItem`, which is payroll-triggered and
+    doesn't apply here).
 
 ---
 
@@ -387,6 +428,24 @@ nature. Requires: explicit consent (the `consent_records` table exists),
 worker access to their own score and its inputs (the API returns them),
 and no automated decision without explanation (decline reasons are returned
 and recorded).
+
+**⚠️ Direct-to-consumer (Phase 5) breaks the argument above — unresolved,
+do not launch without legal review.** Everything in this section rests on
+"recovery only by payroll deduction — no recourse to the worker." D2C has
+no payroll relationship to recover from: the design (see Phase 5) is direct
+debit from the worker's own bank account, authorized in advance, pulled on
+a predicted payday. That is recourse, and a real collections relationship —
+the two things principle 3 above says keep this product outside the credit
+perimeter. `Organization.IsD2C` exists so this is an explicit, queryable
+product-line distinction rather than an implicit assumption baked
+everywhere, but flagging it in code is not a legal position. Before D2C
+accepts a live debit mandate from a real user, get counsel to confirm what
+this repayment model actually is under CBN's framework (or Reg Z's
+"qualifying EWA product" conditions, ⚠️ also unconfirmed above) — the
+"structurally not lending" argument this whole section makes may not
+survive it unchanged, and D2C may need its own regulatory treatment
+entirely (interest disclosure, a lending license, or a different repayment
+mechanism than the one currently designed).
 
 ---
 

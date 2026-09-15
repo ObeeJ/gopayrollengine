@@ -27,6 +27,15 @@ type Organization struct {
 	// per-account currency invariant, not convert anything.
 	Currency money.Currency `gorm:"default:NGN" json:"currency"`
 
+	// IsD2C flags a direct-to-consumer org — a worker onboarded without an
+	// employer running payroll for them (see migration 000030). Their single
+	// Employee record is themself, not staff of a business; EWA eligibility
+	// and settlement for this org come from observed bank deposit history
+	// and direct debit rather than payroll accrual and deduction. Query this
+	// explicitly wherever that distinction matters — don't infer it from the
+	// absence of payroll activity.
+	IsD2C bool `gorm:"column:is_d2c;default:false" json:"is_d2c"`
+
 	IsActive  bool           `gorm:"default:true" json:"is_active"`
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`

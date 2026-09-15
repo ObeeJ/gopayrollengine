@@ -311,10 +311,20 @@ more of the same. That is where the actual differentiation is:
 
 - ~~Hourly/shift accrual from real timesheet data~~ — done: `TimeEntry`
   (migration 000018) accrues hourly/gig staff from approved timesheet entries,
-  never an assumed schedule. Still open: no shift-differential or overtime
-  pay rules, and payroll only pays whole approved entries closed out before
-  the run — a late approval after payroll has already run for that period
-  is not swept up retroactively.
+  never an assumed schedule.
+- ~~Shift-differential/overtime pay rules for hourly accrual~~ — done:
+  `PayrollPolicy` (migration 000027) configures per-shift multipliers (night,
+  weekend, holiday) and a weekly overtime threshold + multiplier;
+  `services.ComputeHourlyGross` applies both when a payroll run computes
+  hourly gross — overtime minutes still earn their shift differential, and
+  the overtime premium is a strictly additional amount on top, never a
+  replacement. EWA eligibility's accrual estimate (`accruedHourlyToDateTx`)
+  deliberately keeps using the flat rate rather than this — it only needs to
+  stay a conservative floor on wages already earned, and the exact figure is
+  settled at payroll time regardless.
+- Still open: payroll only pays whole approved entries closed out before the
+  run — a late approval after payroll has already run for that period is not
+  swept up retroactively.
 - Multi-currency, multi-country
 - Direct-to-consumer (much harder: no payroll deduction, so no recourse-free model)
 

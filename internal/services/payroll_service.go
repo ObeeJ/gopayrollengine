@@ -56,21 +56,20 @@ func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string
 		for _, emp := range employees {
 			gross := emp.Salary
 			if emp.IsHourly() {
-				// Gross is real approved hours × rate, never the fixed Salary
-				// column, which hourly employees don't use. asOf=now is safe
-				// here: payroll normally runs after the period has closed, so
-				// SumApprovedMinutes' period boundary — not the asOf bound —
-				// is what limits the sum to this period's entries. An entry
-				// approved after this payroll already ran is out of scope for
-				// this run, the same way a late-approved advance would be.
-				minutes, err := models.SumApprovedMinutes(tx, orgID, emp.ID, period, time.Now())
-				if err != nil {
-					return fmt.Errorf("hourly accrual lookup for %s failed: %w", emp.ID, err)
-				}
-				gross, err = emp.HourlyRateKobo.Percent(minutes, 60)
+				// Gross is real approved hours × rate, with shift
+				// differentials and weekly overtime applied, never the fixed
+				// Salary column, which hourly employees don't use. asOf=now
+				// is safe here: payroll normally runs after the period has
+				// closed, so the period boundary — not the asOf bound — is
+				// what limits the computation to this period's entries. An
+				// entry approved after this payroll already ran is out of
+				// scope for this run, the same way a late-approved advance
+				// would be.
+				breakdown, err := ComputeHourlyGross(tx, orgID, emp.ID, period, time.Now(), emp.HourlyRateKobo)
 				if err != nil {
 					return fmt.Errorf("hourly gross computation for %s failed: %w", emp.ID, err)
 				}
+				gross = breakdown.GrossKobo
 			}
 
 			item := models.PayrollItem{

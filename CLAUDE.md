@@ -42,6 +42,13 @@ a concurrent request cannot race past one checked a moment earlier.
   real approved `TimeEntry` rows (`accruedHourlyToDateTx`, migration 000018) —
   never an assumed schedule. An unapproved entry counts toward nothing:
   accrual, payroll, and dependency scoring all read only `status = 'approved'`.
+- `accruedHourlyToDateTx` deliberately stays flat-rate (`HourlyRateKobo × minutes`),
+  even though actual payroll no longer is — `services.ComputeHourlyGross`
+  (migration 000027) applies `PayrollPolicy` shift differentials and weekly
+  overtime there. Eligibility only needs a conservative floor on wages already
+  earned; the exact figure settles at payroll time regardless. Don't wire
+  ComputeHourlyGross into eligibility without deciding whether an EWA draw
+  should be able to anticipate an overtime premium that hasn't happened yet.
 - Advances settle by netting out of the next payroll item, inside the payroll
   creation transaction (`SettleAdvancesForPayrollItem`). An advance that does not
   settle is money the business never recovers.

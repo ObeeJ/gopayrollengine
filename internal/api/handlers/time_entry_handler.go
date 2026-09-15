@@ -27,9 +27,10 @@ func NewTimeEntryHandler(svc *services.TimeEntryService) *TimeEntryHandler {
 // SubmitTimeEntry — POST /api/v1/worker/time-entries.
 func (h *TimeEntryHandler) SubmitTimeEntry(c *gin.Context) {
 	var req struct {
-		WorkDate      string `json:"work_date" binding:"required"` // "2006-01-02"
-		MinutesWorked int    `json:"minutes_worked" binding:"required"`
-		Note          string `json:"note"`
+		WorkDate      string                    `json:"work_date" binding:"required"` // "2006-01-02"
+		MinutesWorked int                       `json:"minutes_worked" binding:"required"`
+		ShiftType     models.TimeEntryShiftType `json:"shift_type"`
+		Note          string                    `json:"note"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -44,12 +45,14 @@ func (h *TimeEntryHandler) SubmitTimeEntry(c *gin.Context) {
 	employeeID := middleware.EmployeeID(c)
 	orgID := middleware.OrgID(c)
 
-	entry, err := h.svc.SubmitTimeEntry(c.Request.Context(), orgID, employeeID, workDate, req.MinutesWorked, req.Note)
+	entry, err := h.svc.SubmitTimeEntry(
+		c.Request.Context(), orgID, employeeID, workDate, req.MinutesWorked, req.ShiftType, req.Note)
 	if err != nil {
 		switch {
 		case errors.Is(err, services.ErrTimeEntryNotHourly),
 			errors.Is(err, services.ErrTimeEntryFutureDate),
-			errors.Is(err, services.ErrTimeEntryInvalidRange):
+			errors.Is(err, services.ErrTimeEntryInvalidRange),
+			errors.Is(err, services.ErrTimeEntryInvalidShift):
 			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 		case errors.Is(err, gorm.ErrRecordNotFound):
 			c.JSON(http.StatusNotFound, gin.H{"error": "employee record not found"})

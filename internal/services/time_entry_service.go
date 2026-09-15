@@ -19,7 +19,15 @@ var (
 	ErrTimeEntryFutureDate      = errors.New("time entry: work date is in the future")
 	ErrTimeEntryInvalidRange    = errors.New("time entry: minutes worked must be between 1 and 1440")
 	ErrTimeEntryAlreadyResolved = errors.New("time entry: already approved or rejected")
+	ErrTimeEntryInvalidShift    = errors.New("time entry: shift_type must be regular, night, weekend, or holiday")
 )
+
+var validShiftTypes = map[models.TimeEntryShiftType]bool{
+	models.ShiftRegular: true,
+	models.ShiftNight:   true,
+	models.ShiftWeekend: true,
+	models.ShiftHoliday: true,
+}
 
 // maxMinutesPerEntry mirrors the CHECK constraint in migration 000018: a
 // single entry longer than 24h is a data error, not a long shift.
@@ -35,13 +43,21 @@ type TimeEntryService struct{}
 // NewTimeEntryService constructs the service.
 func NewTimeEntryService() *TimeEntryService { return &TimeEntryService{} }
 
-// SubmitTimeEntry records a worker's claim of hours worked on a given date.
-// It starts 'pending' and counts toward nothing until an admin reviews it.
+// SubmitTimeEntry records a worker's claim of hours worked on a given date,
+// with which shift differential (if any) applies. It starts 'pending' and
+// counts toward nothing until an admin reviews it.
 func (s *TimeEntryService) SubmitTimeEntry(
-	ctx context.Context, orgID, employeeID string, workDate time.Time, minutesWorked int, note string,
+	ctx context.Context, orgID, employeeID string, workDate time.Time, minutesWorked int,
+	shiftType models.TimeEntryShiftType, note string,
 ) (*models.TimeEntry, error) {
 	if minutesWorked <= 0 || minutesWorked > maxMinutesPerEntry {
 		return nil, ErrTimeEntryInvalidRange
+	}
+	if shiftType == "" {
+		shiftType = models.ShiftRegular
+	}
+	if !validShiftTypes[shiftType] {
+		return nil, ErrTimeEntryInvalidShift
 	}
 	day := truncateToDay(workDate)
 	if day.After(truncateToDay(time.Now())) {
@@ -63,6 +79,7 @@ func (s *TimeEntryService) SubmitTimeEntry(
 			EmployeeID:     employeeID,
 			WorkDate:       day,
 			MinutesWorked:  minutesWorked,
+			ShiftType:      shiftType,
 			Note:           note,
 		}
 		if err := tx.Create(&record).Error; err != nil {

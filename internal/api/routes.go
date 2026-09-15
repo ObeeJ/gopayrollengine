@@ -45,6 +45,18 @@ func SetupRouter() *gin.Engine {
 	authHandler := &handlers.AuthHandler{OrgRepo: orgRepo}
 	workerAuthHandler := handlers.NewWorkerAuthHandler(userRepo, empRepo)
 	ewaService := services.NewEWAService()
+	// D2C eligibility (services.EWAService.D2CProvider) reads from the same
+	// banklink.Provider the bank-link endpoints below write to — one shared
+	// instance, not two independent ones, the same way a real provider
+	// would eventually be a single configured client. Only wired under
+	// MOCK_MODE; see the longer comment on the bank-link route group below
+	// for why a D2C org otherwise gets ErrD2CProviderUnavailable and blocks
+	// with DeclineNoIncomeHistory rather than a fake prediction.
+	var d2cProvider banklink.DebitProvider
+	if os.Getenv("MOCK_MODE") == "true" {
+		d2cProvider = banklink.NewMock()
+		ewaService.D2CProvider = d2cProvider
+	}
 	empHandler := handlers.NewEmployeeHandler(empRepo, ewaService)
 	payrollService := services.NewPayrollService(payrollRepo, empRepo)
 	payrollHandler := &handlers.PayrollHandler{Service: payrollService}
@@ -181,10 +193,10 @@ func SetupRouter() *gin.Engine {
 			// linking flow to a real user in production would let them
 			// "link" an account and get back canned success — the same
 			// reason cmd/api/main.go's collect-d2c-debits mode refuses to
-			// run outside MOCK_MODE. Remove this gate only once a real
-			// provider replaces banklink.NewMock() below.
-			if os.Getenv("MOCK_MODE") == "true" {
-				d2cBankLinkHandler := handlers.NewD2CBankLinkHandler(banklink.NewMock())
+			// run outside MOCK_MODE. Remove this gate only once d2cProvider
+			// above is a real provider.
+			if d2cProvider != nil {
+				d2cBankLinkHandler := handlers.NewD2CBankLinkHandler(d2cProvider)
 				d2cBankLink := worker.Group("/d2c/bank-link")
 				{
 					d2cBankLink.POST("/initiate", d2cBankLinkHandler.InitiateLink)

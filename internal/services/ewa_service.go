@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"go-payroll-engine/internal/integrations/banklink"
 	"go-payroll-engine/internal/models"
 	"go-payroll-engine/internal/observability"
 	"go-payroll-engine/internal/workers"
@@ -35,15 +36,40 @@ const (
 	// isn't told they haven't earned enough when the real cause is their
 	// employer's funding, not their own accrual.
 	DeclineFundingPoolExhausted = "funding_pool_exhausted"
+	// DeclineNoIncomeHistory is D2C's analogue of DeclineNoSalaryOnFile — no
+	// linked bank account, no banklink provider configured, or not enough
+	// observed deposit history for PredictNextPayday to trust. See
+	// d2cIncomeBasisTx.
+	DeclineNoIncomeHistory = "no_income_history"
 )
 
 // ErrAdvanceDeclined is returned when a request fails a guardrail. The advance
 // row is still written with status=declined so the decision is auditable.
 var ErrAdvanceDeclined = errors.New("advance declined")
 
+// d2cIncomeBasisTx's own failure modes — both surfaced to eligibilityTx as
+// the same DeclineNoIncomeHistory block, alongside ErrInsufficientPaydayHistory.
+var (
+	// ErrD2CNoLinkedAccount — the worker has no D2CBankLink in Linked status
+	// to predict income from.
+	ErrD2CNoLinkedAccount = errors.New("ewa: d2c worker has no linked bank account")
+	// ErrD2CProviderUnavailable — EWAService.D2CProvider is nil. Expected
+	// whenever a deployment isn't running MOCK_MODE, since no real
+	// banklink.Provider exists yet — see routes.go's own MOCK_MODE gate on
+	// the bank-link endpoints.
+	ErrD2CProviderUnavailable = errors.New("ewa: no banklink provider is configured")
+)
+
 // EWAService owns earned wage access: what a worker has earned, what they may
 // draw, and what happens when they draw it.
-type EWAService struct{}
+type EWAService struct {
+	// D2CProvider is optional — nil for every payroll-based org, which never
+	// reads it. Set it (routes.go does this only under MOCK_MODE, since no
+	// real banklink.Provider exists yet) to let a D2C org's eligibility be
+	// computed from PredictNextPayday instead of blocking outright on
+	// ErrD2CProviderUnavailable.
+	D2CProvider banklink.Provider
+}
 
 // NewEWAService constructs the service.
 func NewEWAService() *EWAService { return &EWAService{} }
@@ -146,6 +172,90 @@ func (s *EWAService) hourlyMonthlyEarningsBasisTx(tx *gorm.DB, orgID, employeeID
 	return earned.Percent(1, 3)
 }
 
+// d2cIncomeBasisTx computes a D2C worker's income basis from
+// services.PredictNextPayday instead of payroll accrual — see
+// docs/EWA_ROADMAP.md's own note that this was the last piece of D2C
+// eligibility still borrowed from the payroll-shaped path. Returns the same
+// (basis, accrued) shape eligibilityTx already expects from its
+// salaried/hourly branches: basis is the "typical income" figure (dependency
+// scoring's denominator, and what the API shows as monthly_salary); accrued
+// is a straight-line-to-date estimate over the predicted pay cycle.
+//
+// Fails closed on every uncertain path — no linked account, no provider
+// configured, or PredictNextPayday's own ErrInsufficientPaydayHistory — all
+// three are surfaced to eligibilityTx as ErrD2CNoLinkedAccount,
+// ErrD2CProviderUnavailable, or the prediction error itself, never a
+// fallback guess. A wrong guess here isn't just a bad UI number the way a
+// mispriced payroll accrual would be — it becomes the basis for a real
+// direct debit collection later.
+func (s *EWAService) d2cIncomeBasisTx(ctx context.Context, tx *gorm.DB, employeeID string, asOf time.Time) (basis, accrued money.Kobo, err error) {
+	if s.D2CProvider == nil {
+		return 0, 0, ErrD2CProviderUnavailable
+	}
+
+	var link models.D2CBankLink
+	if err := tx.Where("employee_id = ? AND status = ?", employeeID, models.D2CBankLinkLinked).
+		First(&link).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 0, 0, ErrD2CNoLinkedAccount
+		}
+		return 0, 0, err
+	}
+
+	txs, err := s.D2CProvider.GetTransactions(ctx, link.ProviderAccountRef, asOf.AddDate(0, d2cTransactionLookback, 0))
+	if err != nil {
+		return 0, 0, err
+	}
+
+	pred, err := PredictNextPayday(txs, asOf)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	periodStart := pred.NextPredictedDate.AddDate(0, 0, -pred.IntervalDays)
+	acc, err := d2cAccruedToDate(pred.AverageAmountKobo, periodStart, pred.NextPredictedDate, asOf)
+	if err != nil {
+		return 0, 0, err
+	}
+	return pred.AverageAmountKobo, acc, nil
+}
+
+// d2cAccruedToDate is AccruedToDate's D2C analogue: straight-line accrual of
+// avgAmount across [periodStart, nextPredicted) rather than a calendar month.
+// Calendar days, not workingDaysBetween's Mon–Fri count — a recurring
+// deposit pattern has no reason to follow a business-day schedule the way
+// payroll does.
+func d2cAccruedToDate(avgAmount money.Kobo, periodStart, nextPredicted, asOf time.Time) (money.Kobo, error) {
+	if !avgAmount.IsPositive() {
+		return 0, nil
+	}
+	// Both boundaries come from real transaction timestamps (via
+	// PredictNextPayday), which carry whatever time-of-day the bank posted
+	// them at — truncate everything to whole calendar days up front so
+	// "elapsed" below counts full days consistently, the same way
+	// AccruedToDate's period boundary is inherently day-aligned by parsing
+	// from a "YYYY-MM" period string.
+	periodStart = truncateToDay(periodStart)
+	nextPredicted = truncateToDay(nextPredicted)
+	asOf = truncateToDay(asOf)
+
+	total := int(nextPredicted.Sub(periodStart).Hours() / 24)
+	if total <= 0 {
+		return 0, nil
+	}
+	if asOf.Before(periodStart) {
+		return 0, nil
+	}
+	if !asOf.Before(nextPredicted) {
+		return avgAmount, nil
+	}
+	elapsed := int(asOf.Sub(periodStart).Hours() / 24)
+	if elapsed <= 0 {
+		return 0, nil
+	}
+	return avgAmount.Percent(int64(elapsed), int64(total))
+}
+
 // Eligibility — the full picture behind an allow/deny decision. Returned to the
 // worker so the number they see is explained rather than asserted.
 type Eligibility struct {
@@ -200,7 +310,7 @@ type Eligibility struct {
 func (s *EWAService) GetEligibility(ctx context.Context, orgID, employeeID string, asOf time.Time) (*Eligibility, error) {
 	var result *Eligibility
 	err := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
-		e, err := s.eligibilityTx(tx, orgID, employeeID, asOf)
+		e, err := s.eligibilityTx(ctx, tx, orgID, employeeID, asOf)
 		result = e
 		return err
 	})
@@ -209,9 +319,14 @@ func (s *EWAService) GetEligibility(ctx context.Context, orgID, employeeID strin
 
 // eligibilityTx does the work inside an existing RLS-scoped transaction, so the
 // request path can compute eligibility and write the advance atomically.
-func (s *EWAService) eligibilityTx(tx *gorm.DB, orgID, employeeID string, asOf time.Time) (*Eligibility, error) {
+func (s *EWAService) eligibilityTx(ctx context.Context, tx *gorm.DB, orgID, employeeID string, asOf time.Time) (*Eligibility, error) {
 	var emp models.Employee
 	if err := tx.First(&emp, "id = ?", employeeID).Error; err != nil {
+		return nil, err
+	}
+
+	var org models.Organization
+	if err := tx.First(&org, "id = ?", orgID).Error; err != nil {
 		return nil, err
 	}
 
@@ -236,14 +351,20 @@ func (s *EWAService) eligibilityTx(tx *gorm.DB, orgID, employeeID string, asOf t
 		el.Blocked, el.BlockedReason = true, DeclineInactiveAccount
 		return el, nil
 	}
-	if emp.IsHourly() {
-		if !emp.HourlyRateKobo.IsPositive() {
+	// D2C workers legitimately carry Salary: 0 (see D2CHandler.Signup) — a
+	// D2C org's income basis comes from d2cIncomeBasisTx below, not this
+	// on-file check, so it's skipped entirely rather than blocking every D2C
+	// worker on a field that was never meant to apply to them.
+	if !org.IsD2C {
+		if emp.IsHourly() {
+			if !emp.HourlyRateKobo.IsPositive() {
+				el.Blocked, el.BlockedReason = true, DeclineNoSalaryOnFile
+				return el, nil
+			}
+		} else if !emp.Salary.IsPositive() {
 			el.Blocked, el.BlockedReason = true, DeclineNoSalaryOnFile
 			return el, nil
 		}
-	} else if !emp.Salary.IsPositive() {
-		el.Blocked, el.BlockedReason = true, DeclineNoSalaryOnFile
-		return el, nil
 	}
 
 	// MonthlySalary is a stable "typical monthly income" reference — the
@@ -252,9 +373,25 @@ func (s *EWAService) eligibilityTx(tx *gorm.DB, orgID, employeeID string, asOf t
 	// it is the actual trailing average rather than an assumed full-time month:
 	// assuming one would overstate a part-time worker's income, and the
 	// roadmap is explicit that hourly accrual "must not be faked" — see
-	// migration 000018.
+	// migration 000018. A D2C worker has no payroll relationship at all, so
+	// its basis comes from PredictNextPayday's own observed-deposit evidence
+	// instead — see d2cIncomeBasisTx.
 	var accrued money.Kobo
-	if emp.IsHourly() {
+	switch {
+	case org.IsD2C:
+		basis, acc, err := s.d2cIncomeBasisTx(ctx, tx, employeeID, asOf)
+		if err != nil {
+			if errors.Is(err, ErrInsufficientPaydayHistory) ||
+				errors.Is(err, ErrD2CNoLinkedAccount) ||
+				errors.Is(err, ErrD2CProviderUnavailable) {
+				el.Blocked, el.BlockedReason = true, DeclineNoIncomeHistory
+				return el, nil
+			}
+			return nil, err
+		}
+		el.MonthlySalary = basis
+		accrued = acc
+	case emp.IsHourly():
 		basis, err := s.hourlyMonthlyEarningsBasisTx(tx, orgID, employeeID, emp.HourlyRateKobo, asOf)
 		if err != nil {
 			return nil, err
@@ -264,7 +401,7 @@ func (s *EWAService) eligibilityTx(tx *gorm.DB, orgID, employeeID string, asOf t
 		if err != nil {
 			return nil, err
 		}
-	} else {
+	default:
 		el.MonthlySalary = emp.Salary
 		var err error
 		accrued, err = AccruedToDate(emp.Salary, period, asOf)
@@ -283,8 +420,12 @@ func (s *EWAService) eligibilityTx(tx *gorm.DB, orgID, employeeID string, asOf t
 	// necessarily understates final pay early in the period and converges to
 	// the true total as more entries are approved — the safe direction to be
 	// wrong in, since it never promises a worker more than has been verified.
+	// A D2C worker's predicted payday is the same kind of unverified figure —
+	// a confident prediction, not a disclosed salary or an approved
+	// timesheet — so it gets the same conservative (understating) treatment
+	// as hourly, not the fixed-salary one.
 	periodEarningsBasis := emp.Salary
-	if emp.IsHourly() {
+	if emp.IsHourly() || org.IsD2C {
 		periodEarningsBasis = accrued
 	}
 
@@ -442,7 +583,7 @@ func (s *EWAService) RequestAdvance(
 		}
 
 		now := time.Now()
-		el, err := s.eligibilityTx(tx, orgID, employeeID, now)
+		el, err := s.eligibilityTx(ctx, tx, orgID, employeeID, now)
 		if err != nil {
 			return err
 		}

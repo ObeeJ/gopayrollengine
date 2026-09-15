@@ -450,16 +450,41 @@ more of the same. That is where the actual differentiation is:
     production would hand them back a canned "success" for an account that
     was never actually linked to anything. Remove that guard only once a
     real `banklink.DebitProvider` replaces `banklink.NewMock()` there.
+  - ~~Eligibility computed from predicted income~~ — done.
+    `EWAService.eligibilityTx` branches on `Organization.IsD2C` before the
+    salaried/hourly split it already had: a D2C worker's `Employee.Salary`
+    is legitimately zero (see `D2CHandler.Signup`), so the on-file-salary
+    check that blocks every other zero-salary employee is skipped for them,
+    and `d2cIncomeBasisTx` computes their basis from
+    `services.PredictNextPayday` instead — the worker's linked account's own
+    observed deposit history, not a declared salary or an approved
+    timesheet. `d2cAccruedToDate` is `AccruedToDate`'s D2C analogue:
+    straight-line accrual across `[periodStart, NextPredictedDate)`, using
+    calendar days rather than `workingDaysBetween`'s Mon–Fri count, since a
+    recurring deposit pattern has no reason to follow a payroll business-day
+    schedule. `periodEarningsBasis` treats a D2C prediction the same
+    conservative (understating) way it already treats hourly accrual, not
+    the fixed-salary way — a confident prediction is still not the same
+    thing as a disclosed salary or an approved timesheet.
+    Fails closed on every uncertain path, never a fallback guess: no linked
+    account (`ErrD2CNoLinkedAccount`), no `EWAService.D2CProvider`
+    configured (`ErrD2CProviderUnavailable` — expected outside `MOCK_MODE`,
+    since no real provider exists yet), or `PredictNextPayday`'s own
+    `ErrInsufficientPaydayHistory` all surface as the same
+    `DeclineNoIncomeHistory` block. `EWAService.D2CProvider` is an optional
+    field, not a constructor parameter — `services.NewEWAService()`'s 70+
+    existing call sites are unaffected, and it stays `nil` (eligibility
+    blocks D2C orgs cleanly) for every payroll-based org, which never reads
+    it. `routes.go` wires it to the same `banklink.Provider` instance the
+    bank-link endpoints already use, only under `MOCK_MODE`.
   - Still to build: a real aggregator (Mono/Okra) wired to
     `banklink.DebitProvider` (no vendor credential or API spec was available
     to integrate against honestly — `Mock` is the only implementation so
-    far), signature verification on `HandleD2CDebitWebhook` (placeholder
+    far) and signature verification on `HandleD2CDebitWebhook` (placeholder
     payload shape today, since there's no real provider's format to verify
-    against), and eligibility computed from predicted income
-    (`PredictNextPayday`'s output) rather than payroll accrual — an
-    `EWAAdvance` can be requested for a D2C worker today, but its
-    eligibility cap still comes from the payroll-shaped accrual logic, which
-    doesn't mean anything for a worker with no payroll relationship.
+    against). Both are blocked on access this environment doesn't have, not
+    on remaining design work — everything else on this roadmap's D2C
+    section is done.
 
 ---
 

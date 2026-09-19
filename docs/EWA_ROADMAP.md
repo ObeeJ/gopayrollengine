@@ -1,8 +1,11 @@
 # Earned Wage Access — Research, Product Plan, and Roadmap
 
 Owner: platform / payments
-Status: Phase 1 implemented, Phases 2–5 planned
-Last updated: 2026-08
+Status: Phases 1–5 engineering-complete (see §6 for each item's location in
+this repository). What remains: Phase 0's real-world research and legal
+review (not engineering work), and two D2C items blocked on missing vendor
+access (a real banklink aggregator, its webhook's signature verification).
+Last updated: 2026-09
 
 ---
 
@@ -251,10 +254,14 @@ highly sensitive to all three.
 
 ## 6. Roadmap
 
-### Phase 0 — Validate the premise (do this before Phase 2)
+### Phase 0 — Validate the premise (still outstanding; not engineering work)
 
 The guardrail design rests on behavioural claims taken from secondary sources.
-Before building further on it:
+Every phase below was built ahead of this validation, on the reasoning that
+the thresholds are recalibratable per-org policy, not load-bearing
+architecture — but nothing here should be taken as evidence the underlying
+behavioural claims are correct. Before relying on the product's current
+guardrail thresholds:
 
 - Primary user research: 30+ interviews across Nigerian salaried workers, split
   between EWA users and non-users
@@ -272,7 +279,7 @@ treated as provisional.
 
 Ledger, accrual, eligibility, guardrails, settlement, tenant isolation.
 
-### Phase 2 — Make it real
+### Phase 2 — Make it real ✅ complete
 
 - ~~Disbursement execution: EWA draws currently post to the ledger but are not
   yet wired to an actual Monnify transfer.~~ — done: provider abstraction
@@ -281,33 +288,79 @@ Ledger, accrual, eligibility, guardrails, settlement, tenant isolation.
   (migration 000019) gives each org a dedicated deposit account; a deposit
   credits `employer_funding` and offsets `cash_settlement`, and
   `ewa_policies.require_funding_coverage` (opt-in, off by default) blocks a
-  draw that would push the org's exposure past what it has funded. Still
-  open: no reconciliation job cross-checking the ledger against the
-  provider's own statement of the account (Phase 3's reconciliation item
-  covers payroll disbursement the same way and should absorb this too).
-- Worker-facing nudge content for the elevated tier
-- Accrual snapshot cron (`ewa_accrual_snapshots` is defined but not yet populated)
-- Admin API for policy configuration
+  draw that would push the org's exposure past what it has funded. The
+  reconciliation-job gap noted here previously is closed: `ReconciliationJob`
+  (Phase 3, below) checks drift on `cash_settlement` itself, which is exactly
+  the account both EWA disbursement and employer deposits move — it absorbs
+  funding-pool reconciliation without needing a second job.
+- ~~Worker-facing nudge content for the elevated tier~~ — done: `TierNudge`
+  (`internal/services/ewa_dependency.go`) returns tier-appropriate copy,
+  always present from Elevated upward; `AdvanceHandler.GetEarnedWages`/
+  `RequestAdvance` return it as `nudge` in every eligibility response.
+- ~~Accrual snapshot cron~~ — done: `AccrualSnapshotCollector`
+  (`internal/services/accrual_snapshot_collector.go`) populates
+  `ewa_accrual_snapshots`, wired to `cmd/api/main.go`'s `snapshot-accruals`
+  CLI mode — the same external-cron pattern every other batch job here uses.
+- ~~Admin API for policy configuration~~ — done: `GET`/`PUT /api/v1/policy`
+  (`PolicyHandler`, admin-role-gated on write).
 
-### Phase 3 — Close the loops
+### Phase 3 — Close the loops ✅ complete
 
-- Reconciliation job: ledger balances vs. Monnify statements, alerting on drift
-- Write-off path for terminated employees with outstanding advances
-- Partial settlement when net pay is insufficient
-- Multi-period advances (draw in August, settle across September/October)
-- Aggregate employer dashboard (anonymised, k-anonymity threshold ≥ 10)
+- ~~Reconciliation job: ledger balances vs. Monnify statements, alerting on
+  drift~~ — done: `ReconciliationJob` (`internal/services/reconciliation_job.go`,
+  migration 000021) compares `cash_settlement`'s movement between runs
+  against the Monnify wallet's actual balance change and alerts
+  (`ReconciliationAlertsTotal`) past a configurable threshold — a delta
+  comparison, not absolute, since the wallet is shared across every org (see
+  that file's own comment for why). Wired to `cmd/api/main.go`'s `reconcile`
+  CLI mode.
+- ~~Write-off path for terminated employees with outstanding advances~~ —
+  done: `EmployeeTerminationService`/`TerminateEmployee` cancels any advance
+  not yet disbursed and writes off any that were — there is no further
+  payroll run to recover a disbursed advance from once employment ends.
+- ~~Partial settlement when net pay is insufficient~~ and
+  ~~multi-period advances (draw in August, settle across
+  September/October)~~ — done as one mechanism, migration
+  000022 (`ewa_advance_partial_recovery`): `EWAAdvance.RecoveredKobo` tracks
+  how much of `AmountKobo` payroll has actually withheld so far, and an
+  advance stays `Disbursed` — recovered a little at a time across however
+  many payroll runs it takes — until `RecoveredKobo` reaches `AmountKobo`,
+  rather than requiring one run to withhold the whole amount or fail. The
+  same mechanism naturally covers both bullets: partial settlement within
+  one run and settlement spread across several are the same "not yet fully
+  recovered" state.
+- ~~Aggregate employer dashboard (anonymised, k-anonymity threshold ≥ 10)~~ —
+  done: `EmployerDashboardService`/`GET /api/v1/analytics/workforce-dependency`
+  suppresses any tier-count breakdown below the k-anonymity threshold before
+  it ever reaches the response — see that service's `buildBreakdown`.
 
-### Phase 4 — Beyond the shift
+### Phase 4 — Beyond the shift ✅ complete
 
 The dependency score identifies people the product cannot help by giving them
 more of the same. That is where the actual differentiation is:
 
-- Automated savings: round-up or a fixed share diverted at payroll
-- Bill-timing tools — much repeat usage is a timing mismatch, not a shortfall
-- Referral to financial counselling at the strained tier
-- Employer-funded hardship grants as a genuine alternative to a fourth advance
+- ~~Automated savings: round-up or a fixed share diverted at payroll~~ —
+  done: `EWAService.SetSavingsPreference`/`GetSavingsBalance` (migration
+  000023) plus `DivertSavingsForPayrollItem`, which actually moves the
+  configured share out at payroll settlement time, not just records a
+  preference.
+- ~~Bill-timing tools — much repeat usage is a timing mismatch, not a
+  shortfall~~ — done: `EWAService.GetBillTimingPlan` (migration 000024,
+  `ewa_bill_service.go`) lays a worker's recorded bills against their next
+  payday, flags any due before it as a timing mismatch, and checks each
+  against currently available draw capacity soonest-due-first.
+- ~~Referral to financial counselling at the strained tier~~ — done:
+  `TierCounsellingReferral` (migration 000025) sets a referral on the
+  `Eligibility` response for Strained and Dependent tiers, computed
+  separately from the dependency score itself.
+- ~~Employer-funded hardship grants as a genuine alternative to a fourth
+  advance~~ — done: `EWAService.IssueHardshipGrant` (migration 000026,
+  admin-only) — genuinely discretionary employer money, not another draw
+  against wages; surfaced as `hardship_grant_suggested` on the eligibility
+  response at the moment a fourth advance would help least (draw limit
+  reached while already Strained or Dependent).
 
-### Phase 5 — Scale
+### Phase 5 — Scale ✅ engineering-complete except two items blocked on missing vendor access (see D2C's last bullet below)
 
 - ~~Hourly/shift accrual from real timesheet data~~ — done: `TimeEntry`
   (migration 000018) accrues hourly/gig staff from approved timesheet entries,

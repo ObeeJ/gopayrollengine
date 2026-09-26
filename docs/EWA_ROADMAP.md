@@ -516,6 +516,48 @@ more of the same. That is where the actual differentiation is:
     D2C signups with the same 503 before creating anything, so a real user
     is told upfront instead of being issued an identity that can never link
     an account, get eligibility, or receive an advance.
+  - ~~Consent enforcement and revocation~~ — done. Every consent above was
+    faithfully *recorded* — a real audit trail — but nothing ever *read
+    it back*: `models.HasActiveConsent` existed and was called nowhere,
+    and there was no endpoint for a worker to withdraw either bank-link
+    read or debit-mandate consent at all. `D2CBankLinkHandler` gained
+    `POST /api/v1/worker/d2c/bank-link/revoke` (withdraws the whole
+    link — read access and, with it, debit capability) and
+    `.../revoke-debit-mandate` (withdraws only the mandate, leaving read
+    access intact — mirroring `AuthorizeDebit`'s own separation from
+    `CompleteLink`). Neither is gated by `errBankLinkUnavailable`: a
+    worker must always be able to withdraw consent, whether or not a live
+    provider is configured right now. `d2cIncomeBasisTx`,
+    `attemptD2CCollectionForAdvance` (the sweep's own re-prediction read),
+    and `InitiateD2CCollection` (the actual debit) each now also call
+    `models.HasActiveConsent` before proceeding — independently of the
+    `D2CBankLink` row's own `Status`/`DebitMandateRef` fields, which is
+    what makes an employer-recorded withdrawal via the generic
+    `ConsentHandler.RecordConsent` endpoint, or a `ConsentRecord`'s own
+    one-year `ExpiresAt` lapsing, actually take effect too — not only the
+    new worker-facing endpoints.
+
+    Fixed a real bug in `HasActiveConsent` itself along the way:
+    `ConsentRecord` is append-only (a withdrawal is a new `Granted: false`
+    row, never an edit to the original grant), but the old implementation
+    counted *any* matching `granted = true` row — so a since-withdrawn
+    consent's original grant row, never deleted, kept reporting active
+    forever. It now looks at the single most recent row for that
+    (org, employee, consent type) and checks whether *that one* is
+    granted and unexpired.
+
+    Fixing `SweepD2CCollections`'s per-org advance query (add an explicit
+    `organization_id = ?` filter, not left to RLS alone) turned out to be
+    a prerequisite, not a nice-to-have: this codebase's own test suite
+    runs against a superuser Postgres connection, which bypasses RLS
+    entirely (see `setupRLSTestRole`'s comment), so without that filter
+    every org's "scoped" query silently returned every D2C org's
+    advances, and the sweep reprocessed each one once per org instead of
+    once — invisible before this change because nothing downstream cared
+    about the mismatch, and exposed the moment `HasActiveConsent` started
+    checking a real `organization_id`. Production was never affected (the
+    app's own role has no such bypass), but the explicit filter is
+    correct defense-in-depth regardless of which role runs the query.
   - ~~Eligibility computed from predicted income~~ — done.
     `EWAService.eligibilityTx` branches on `Organization.IsD2C` before the
     salaried/hourly split it already had: a D2C worker's `Employee.Salary`

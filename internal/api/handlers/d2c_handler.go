@@ -148,7 +148,7 @@ func (h *D2CHandler) Signup(c *gin.Context) {
 		if err := tx.Create(&models.ConsentRecord{
 			OrganizationID: org.ID,
 			EmployeeID:     emp.ID,
-			ConsentType:    "d2c_direct_debit_disclosure",
+			ConsentType:    models.ConsentTypeD2CDisclosure,
 			Granted:        true,
 			IPAddress:      c.ClientIP(),
 			UserAgent:      c.Request.UserAgent(),

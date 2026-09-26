@@ -134,7 +134,13 @@ func TestD2CSignup_RejectsInvalidCurrency(t *testing.T) {
 
 // A second signup with a phone number already in use must fail outright,
 // never silently attach a second worker identity to someone else's org.
-func TestD2CSignup_DuplicatePhoneFails(t *testing.T) {
+// A duplicate phone number is an ordinary outcome a real client hits
+// (retrying a failed signup, mistyping and trying again) — it must come
+// back as a clean 409, not the 500 this returned before the handler
+// checked for Postgres's own unique-violation error specifically. Found
+// live during a multi-persona review, not by a passing test — this test
+// previously asserted the 500 as expected behavior.
+func TestD2CSignup_DuplicatePhoneReturns409(t *testing.T) {
 	skipIfNoDB(t)
 	body := validD2CSignupBody()
 	w1, c1 := d2cSignupRequest(t, body)
@@ -145,7 +151,7 @@ func TestD2CSignup_DuplicatePhoneFails(t *testing.T) {
 	body2["phone"] = body["phone"]
 	w2, c2 := d2cSignupRequest(t, body2)
 	(&D2CHandler{}).Signup(c2)
-	assert.Equal(t, http.StatusInternalServerError, w2.Code)
+	assert.Equal(t, http.StatusConflict, w2.Code, w2.Body.String())
 }
 
 func TestD2CSignup_RejectsMissingRequiredFields(t *testing.T) {

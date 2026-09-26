@@ -3,6 +3,7 @@ package handlers
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"go-payroll-engine/internal/api/middleware"
 	"go-payroll-engine/internal/models"
 	"go-payroll-engine/internal/workers"
@@ -11,8 +12,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
+
+// pgUniqueViolation is Postgres's own SQLSTATE for a unique constraint
+// violation (23505) — https://www.postgresql.org/docs/current/errcodes-appendix.html.
+const pgUniqueViolation = "23505"
 
 // D2CHandler — direct-to-consumer worker-facing endpoints. Signup is the
 // only handler in this package that creates an Organization rather than
@@ -133,6 +139,19 @@ func (h *D2CHandler) Signup(c *gin.Context) {
 		return models.AppendAuditTx(tx, org.ID, "Organization", org.ID, "d2c_signup", "", org.Name, c.ClientIP(), "")
 	})
 	if txErr != nil {
+		// A duplicate phone number is an ordinary, expected outcome — a
+		// worker retrying a failed signup, or mistyping and trying again —
+		// not a system fault. users.phone has a real UNIQUE constraint
+		// (migration 000004) that this is the only guard against; without
+		// checking for it specifically here, Postgres's constraint
+		// violation fell through to the generic branch below as a 500,
+		// which is what a real client actually saw. Caught live during a
+		// multi-persona review, not by a passing test.
+		var pgErr *pgconn.PgError
+		if errors.As(txErr, &pgErr) && pgErr.Code == pgUniqueViolation {
+			c.JSON(http.StatusConflict, gin.H{"error": "an account with this phone number already exists"})
+			return
+		}
 		middleware.Logger.Error("d2c signup transaction failed", "error", txErr.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to sign up"})
 		return

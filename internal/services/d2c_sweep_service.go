@@ -56,12 +56,24 @@ func SweepD2CCollections(ctx context.Context, asOf time.Time, debitProvider bank
 		err := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
 			var inFlightAdvanceIDs []string
 			if err := tx.Model(&models.D2CDebitCollection{}).
-				Where("status = ?", models.D2CCollectionPending).
+				Where("organization_id = ? AND status = ?", orgID, models.D2CCollectionPending).
 				Pluck("advance_id", &inFlightAdvanceIDs).Error; err != nil {
 				return err
 			}
 
-			q := tx.Where("status = ?", models.AdvanceDisbursed)
+			// organization_id is filtered explicitly, not left to RLS
+			// alone: this loop iterates every D2C org and calls
+			// attemptD2CCollectionForAdvance once per (org, advance) pair
+			// it finds, so a connection that bypasses RLS (a superuser —
+			// exactly what this codebase's own test suite uses; see
+			// setupRLSTestRole's comment) would otherwise have every
+			// org's "scoped" query return every org's advances, and
+			// reprocess each one once per org instead of once, total.
+			// RLS still does the real enforcement for the app's own
+			// non-superuser role; this is defense in depth for the one
+			// query in this file whose scoping mistake would actually
+			// multiply, not just leak.
+			q := tx.Where("organization_id = ? AND status = ?", orgID, models.AdvanceDisbursed)
 			if len(inFlightAdvanceIDs) > 0 {
 				q = q.Where("id NOT IN ?", inFlightAdvanceIDs)
 			}
@@ -89,12 +101,26 @@ func attemptD2CCollectionForAdvance(
 	ctx context.Context, orgID string, adv models.EWAAdvance, asOf time.Time, debitProvider banklink.DebitProvider,
 ) D2CSweepResult {
 	var link models.D2CBankLink
+	var readConsentActive bool
 	err := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
-		return tx.Where("employee_id = ? AND status = ?", adv.EmployeeID, models.D2CBankLinkLinked).
-			First(&link).Error
+		if err := tx.Where("employee_id = ? AND status = ?", adv.EmployeeID, models.D2CBankLinkLinked).
+			First(&link).Error; err != nil {
+			return err
+		}
+		readConsentActive = models.HasActiveConsent(tx, orgID, adv.EmployeeID, models.ConsentTypeD2CBankLinkRead)
+		return nil
 	})
 	if err != nil {
 		return D2CSweepResult{AdvanceID: adv.ID, Err: fmt.Errorf("no linked bank account: %w", err)}
+	}
+	// Checked before the mandate below too: a worker can withdraw read
+	// access on its own (D2CBankLinkHandler.RevokeDebitMandate leaves it
+	// alone, but a plain Revoke or an employer-recorded withdrawal via
+	// ConsentHandler.RecordConsent doesn't touch DebitMandateRef either) —
+	// this sweep must stop re-reading their transaction history the moment
+	// that happens, not just at the point of actually debiting.
+	if !readConsentActive {
+		return D2CSweepResult{AdvanceID: adv.ID, Err: ErrD2CConsentWithdrawn}
 	}
 	if link.DebitMandateRef == nil {
 		return D2CSweepResult{AdvanceID: adv.ID, Err: banklink.ErrNoMandate}

@@ -73,6 +73,19 @@ func OrgCurrencyTx(tx *gorm.DB, orgID string) (money.Currency, error) {
 	return org.Currency, nil
 }
 
+// D2C consent types — see D2CHandler.Signup and D2CBankLinkHandler's
+// CompleteLink/AuthorizeDebit for where each is granted, and its
+// Revoke/RevokeDebitMandate for where each is withdrawn. Named here rather
+// than left as repeated string literals because HasActiveConsent
+// enforcement (services package) and consent recording (handlers package)
+// both have to spell the exact same string — a typo in either would
+// silently defeat enforcement.
+const (
+	ConsentTypeD2CDisclosure   = "d2c_direct_debit_disclosure"
+	ConsentTypeD2CBankLinkRead = "d2c_bank_link_read"
+	ConsentTypeD2CDebitMandate = "d2c_debit_mandate"
+)
+
 // ConsentRecord — NDPR Art. 26; append-only, withdrawal creates a new row.
 type ConsentRecord struct {
 	ID             string     `gorm:"primaryKey" json:"id"`
@@ -94,14 +107,26 @@ func (cr *ConsentRecord) BeforeCreate(tx *gorm.DB) (err error) {
 	return
 }
 
-// HasActiveConsent — true if a current, non-expired consent exists; absence means no processing.
+// HasActiveConsent — true if the most recent ConsentRecord for this
+// (org, employee, consent type) is granted and not expired.
+//
+// ConsentRecord is append-only — a withdrawal is a new row with
+// Granted: false, never an edit to the original grant — so this has to
+// look at the latest row, not merely whether a granted row was ever
+// recorded. Counting any matching granted=true row (the previous
+// implementation) let a since-withdrawn consent's original grant row keep
+// reporting active forever, because that row is never deleted or updated;
+// only the newest row for this (org, employee, consent_type) reflects the
+// current state.
 func HasActiveConsent(db *gorm.DB, orgID, employeeID, consentType string) bool {
-	var count int64
-	db.Model(&ConsentRecord{}).
-		Where("organization_id = ? AND employee_id = ? AND consent_type = ? AND granted = true AND (expires_at IS NULL OR expires_at > ?)",
-			orgID, employeeID, consentType, time.Now()).
-		Count(&count)
-	return count > 0
+	var latest ConsentRecord
+	err := db.Where("organization_id = ? AND employee_id = ? AND consent_type = ?", orgID, employeeID, consentType).
+		Order("consented_at DESC").
+		First(&latest).Error
+	if err != nil {
+		return false
+	}
+	return latest.Granted && (latest.ExpiresAt == nil || latest.ExpiresAt.After(time.Now()))
 }
 
 // BVNVerification — outcome row from a BVN check; stores response hash, never the BVN itself.

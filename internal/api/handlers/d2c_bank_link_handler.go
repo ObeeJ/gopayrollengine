@@ -112,7 +112,7 @@ func (h *D2CBankLinkHandler) CompleteLink(c *gin.Context) {
 		return tx.Create(&models.ConsentRecord{
 			OrganizationID: orgID,
 			EmployeeID:     employeeID,
-			ConsentType:    "d2c_bank_link_read",
+			ConsentType:    models.ConsentTypeD2CBankLinkRead,
 			Granted:        true,
 			IPAddress:      c.ClientIP(),
 			UserAgent:      c.Request.UserAgent(),
@@ -182,7 +182,7 @@ func (h *D2CBankLinkHandler) AuthorizeDebit(c *gin.Context) {
 		return tx.Create(&models.ConsentRecord{
 			OrganizationID: orgID,
 			EmployeeID:     employeeID,
-			ConsentType:    "d2c_debit_mandate",
+			ConsentType:    models.ConsentTypeD2CDebitMandate,
 			Granted:        true,
 			IPAddress:      c.ClientIP(),
 			UserAgent:      c.Request.UserAgent(),
@@ -200,4 +200,123 @@ func (h *D2CBankLinkHandler) AuthorizeDebit(c *gin.Context) {
 		"debit_mandate_ref":   mandateRef,
 		"debit_authorized_at": now,
 	})
+}
+
+// RevokeDebitMandate — POST /api/v1/worker/d2c/bank-link/revoke-debit-mandate;
+// withdraws standing debit authorization only. Read access (payday
+// prediction) is untouched — the link's own Status stays D2CBankLinkLinked
+// — since this consent is deliberately separate from the read consent (see
+// AuthorizeDebit's doc comment); withdrawing one must never imply
+// withdrawing the other. Clearing DebitMandateRef stops
+// InitiateD2CCollection's own lookup from finding a mandate to debit
+// against; the ConsentRecord it also writes here is what makes
+// HasActiveConsent (checked by InitiateD2CCollection and the sweep's own
+// re-prediction read) reflect the withdrawal too, not just the mandate ref
+// going nil.
+func (h *D2CBankLinkHandler) RevokeDebitMandate(c *gin.Context) {
+	orgID := middleware.OrgID(c)
+	employeeID := middleware.EmployeeID(c)
+
+	now := time.Now()
+	err := models.WithOrgScope(c.Request.Context(), orgID, func(tx *gorm.DB) error {
+		var link models.D2CBankLink
+		if err := tx.Where("employee_id = ? AND status = ?", employeeID, models.D2CBankLinkLinked).
+			First(&link).Error; err != nil {
+			return err
+		}
+		if link.DebitMandateRef == nil {
+			return nil
+		}
+		if err := tx.Model(&link).Updates(map[string]interface{}{
+			"debit_mandate_ref":   nil,
+			"debit_authorized_at": nil,
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&models.ConsentRecord{
+			OrganizationID: orgID,
+			EmployeeID:     employeeID,
+			ConsentType:    models.ConsentTypeD2CDebitMandate,
+			Granted:        false,
+			IPAddress:      c.ClientIP(),
+			UserAgent:      c.Request.UserAgent(),
+			ConsentedAt:    now,
+		}).Error
+	})
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "no linked bank account found"})
+			return
+		}
+		middleware.Logger.Error("d2c debit-mandate revoke failed", "employee_id", employeeID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to revoke debit authorization"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"debit_mandate_revoked_at": now})
+}
+
+// Revoke — POST /api/v1/worker/d2c/bank-link/revoke; withdraws the bank
+// link entirely — read access and, with it, debit capability, since every
+// read (d2cIncomeBasisTx, the sweep's own re-prediction) and every debit
+// (InitiateD2CCollection) already require Status == D2CBankLinkLinked.
+// Takes no provider — there's nothing to call out to revoke; this only
+// ever touches our own records — so it works even when h.provider is nil,
+// deliberately not gated by errBankLinkUnavailable like the other three
+// endpoints: a worker must always be able to withdraw consent, whether or
+// not a live provider happens to be configured right now.
+func (h *D2CBankLinkHandler) Revoke(c *gin.Context) {
+	orgID := middleware.OrgID(c)
+	employeeID := middleware.EmployeeID(c)
+
+	now := time.Now()
+	err := models.WithOrgScope(c.Request.Context(), orgID, func(tx *gorm.DB) error {
+		var link models.D2CBankLink
+		if err := tx.Where("employee_id = ? AND status = ?", employeeID, models.D2CBankLinkLinked).
+			First(&link).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&link).Updates(map[string]interface{}{
+			"status":     models.D2CBankLinkRevoked,
+			"revoked_at": now,
+		}).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&models.ConsentRecord{
+			OrganizationID: orgID,
+			EmployeeID:     employeeID,
+			ConsentType:    models.ConsentTypeD2CBankLinkRead,
+			Granted:        false,
+			IPAddress:      c.ClientIP(),
+			UserAgent:      c.Request.UserAgent(),
+			ConsentedAt:    now,
+		}).Error; err != nil {
+			return err
+		}
+		if link.DebitMandateRef == nil {
+			return nil
+		}
+		// A standing debit mandate was also outstanding — withdrawing the
+		// whole link withdraws that consent too, not just the read one.
+		return tx.Create(&models.ConsentRecord{
+			OrganizationID: orgID,
+			EmployeeID:     employeeID,
+			ConsentType:    models.ConsentTypeD2CDebitMandate,
+			Granted:        false,
+			IPAddress:      c.ClientIP(),
+			UserAgent:      c.Request.UserAgent(),
+			ConsentedAt:    now,
+		}).Error
+	})
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "no linked bank account found"})
+			return
+		}
+		middleware.Logger.Error("d2c bank-link revoke failed", "employee_id", employeeID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to revoke linked account"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"revoked_at": now})
 }

@@ -47,8 +47,8 @@ const (
 // row is still written with status=declined so the decision is auditable.
 var ErrAdvanceDeclined = errors.New("advance declined")
 
-// d2cIncomeBasisTx's own failure modes — both surfaced to eligibilityTx as
-// the same DeclineNoIncomeHistory block, alongside ErrInsufficientPaydayHistory.
+// d2cIncomeBasisTx's own failure modes — all three surfaced to eligibilityTx
+// as the same DeclineNoIncomeHistory block, alongside ErrInsufficientPaydayHistory.
 var (
 	// ErrD2CNoLinkedAccount — the worker has no D2CBankLink in Linked status
 	// to predict income from.
@@ -58,6 +58,16 @@ var (
 	// banklink.Provider exists yet — see routes.go's own MOCK_MODE gate on
 	// the bank-link endpoints.
 	ErrD2CProviderUnavailable = errors.New("ewa: no banklink provider is configured")
+	// ErrD2CConsentWithdrawn — the linked account's own Status is still
+	// D2CBankLinkLinked, but the worker's ConsentTypeD2CBankLinkRead
+	// consent is not (or no longer) active per models.HasActiveConsent —
+	// withdrawn (a Granted: false ConsentRecord, whether from
+	// D2CBankLinkHandler.Revoke or the employer-facing ConsentHandler.
+	// RecordConsent) or its one-year ExpiresAt has passed. Checked
+	// separately from the link's own Status so that either kind of
+	// withdrawal actually stops a read, not just D2CBankLinkHandler.Revoke
+	// setting Status itself.
+	ErrD2CConsentWithdrawn = errors.New("ewa: d2c worker's bank-link read consent is not active")
 )
 
 // EWAService owns earned wage access: what a worker has earned, what they may
@@ -181,11 +191,12 @@ func (s *EWAService) hourlyMonthlyEarningsBasisTx(tx *gorm.DB, orgID, employeeID
 // scoring's denominator, and what the API shows as monthly_salary); accrued
 // is a straight-line-to-date estimate over the predicted pay cycle.
 //
-// Fails closed on every uncertain path — no linked account, no provider
-// configured, or PredictNextPayday's own ErrInsufficientPaydayHistory — all
-// three are surfaced to eligibilityTx as ErrD2CNoLinkedAccount,
-// ErrD2CProviderUnavailable, or the prediction error itself, never a
-// fallback guess. A wrong guess here isn't just a bad UI number the way a
+// Fails closed on every uncertain path — no linked account, withdrawn
+// read consent, no provider configured, or PredictNextPayday's own
+// ErrInsufficientPaydayHistory — all four are surfaced to eligibilityTx as
+// ErrD2CNoLinkedAccount, ErrD2CConsentWithdrawn, ErrD2CProviderUnavailable,
+// or the prediction error itself, never a fallback guess. A wrong guess
+// here isn't just a bad UI number the way a
 // mispriced payroll accrual would be — it becomes the basis for a real
 // direct debit collection later.
 func (s *EWAService) d2cIncomeBasisTx(ctx context.Context, tx *gorm.DB, employeeID string, asOf time.Time) (basis, accrued money.Kobo, err error) {
@@ -200,6 +211,9 @@ func (s *EWAService) d2cIncomeBasisTx(ctx context.Context, tx *gorm.DB, employee
 			return 0, 0, ErrD2CNoLinkedAccount
 		}
 		return 0, 0, err
+	}
+	if !models.HasActiveConsent(tx, link.OrganizationID, employeeID, models.ConsentTypeD2CBankLinkRead) {
+		return 0, 0, ErrD2CConsentWithdrawn
 	}
 
 	txs, err := s.D2CProvider.GetTransactions(ctx, link.ProviderAccountRef, asOf.AddDate(0, d2cTransactionLookback, 0))
@@ -393,7 +407,8 @@ func (s *EWAService) eligibilityTx(ctx context.Context, tx *gorm.DB, orgID, empl
 		if err != nil {
 			if errors.Is(err, ErrInsufficientPaydayHistory) ||
 				errors.Is(err, ErrD2CNoLinkedAccount) ||
-				errors.Is(err, ErrD2CProviderUnavailable) {
+				errors.Is(err, ErrD2CProviderUnavailable) ||
+				errors.Is(err, ErrD2CConsentWithdrawn) {
 				el.Blocked, el.BlockedReason = true, DeclineNoIncomeHistory
 				return el, nil
 			}

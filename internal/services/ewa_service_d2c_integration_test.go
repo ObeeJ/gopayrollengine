@@ -18,20 +18,32 @@ import (
 )
 
 // seedD2CLinkedWorker creates a D2C org + employee (via seedD2CWorker) with
-// an already-Linked D2CBankLink, and returns its provider account ref —
-// the state eligibilityTx's D2C branch expects to find.
+// an already-Linked D2CBankLink and an active ConsentTypeD2CBankLinkRead
+// consent — the same two side effects a real D2CBankLinkHandler.CompleteLink
+// call leaves behind, and the state eligibilityTx's D2C branch expects to
+// find. Both are required: d2cIncomeBasisTx checks the consent via
+// models.HasActiveConsent independently of the link's own Status.
 func seedD2CLinkedWorker(t *testing.T) (orgID, employeeID, accountRef string) {
 	t.Helper()
 	orgID, employeeID = seedD2CWorker(t)
 	accountRef = "mock-acct-" + uuid.New().String()[:8]
 
 	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
-		return tx.Create(&models.D2CBankLink{
+		if err := tx.Create(&models.D2CBankLink{
 			OrganizationID:     orgID,
 			EmployeeID:         employeeID,
 			Provider:           "mock",
 			ProviderAccountRef: accountRef,
 			LinkedAt:           time.Now(),
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&models.ConsentRecord{
+			OrganizationID: orgID,
+			EmployeeID:     employeeID,
+			ConsentType:    models.ConsentTypeD2CBankLinkRead,
+			Granted:        true,
+			ConsentedAt:    time.Now(),
 		}).Error
 	}))
 	return orgID, employeeID, accountRef
@@ -79,6 +91,38 @@ func TestGetEligibility_D2CWorker_NoLinkedAccountBlocks(t *testing.T) {
 	skipIfNoDB(t)
 	orgID, employeeID := seedD2CWorker(t)
 	svc := &EWAService{D2CProvider: banklink.NewMock()}
+
+	el, err := svc.GetEligibility(context.Background(), orgID, employeeID, predictionNow)
+	require.NoError(t, err)
+	assert.True(t, el.Blocked)
+	assert.Equal(t, DeclineNoIncomeHistory, el.BlockedReason)
+}
+
+// The link itself is still Status=Linked — nothing here touches
+// D2CBankLink — but a later ConsentRecord withdrew read consent (the same
+// row D2CBankLinkHandler.Revoke or the employer-facing
+// ConsentHandler.RecordConsent would write). This must block exactly like
+// having no linked account at all: the whole point of checking
+// HasActiveConsent independently of the link's own Status is that either
+// kind of withdrawal has to take effect on its own, not only when
+// something also flips the link row.
+func TestGetEligibility_D2CWorker_WithdrawnReadConsentBlocksDespiteLinkedStatus(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID, accountRef := seedD2CLinkedWorker(t)
+
+	mock := banklink.NewMock()
+	mock.Transactions[accountRef] = recurringCredits(4, 30, 30, money.FromNaira(300_000))
+	svc := &EWAService{D2CProvider: mock}
+
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return tx.Create(&models.ConsentRecord{
+			OrganizationID: orgID,
+			EmployeeID:     employeeID,
+			ConsentType:    models.ConsentTypeD2CBankLinkRead,
+			Granted:        false,
+			ConsentedAt:    time.Now().Add(time.Second),
+		}).Error
+	}))
 
 	el, err := svc.GetEligibility(context.Background(), orgID, employeeID, predictionNow)
 	require.NoError(t, err)

@@ -61,6 +61,20 @@ func InitiateD2CCollection(
 		if link.DebitMandateRef == nil {
 			return banklink.ErrNoMandate
 		}
+		// The mandate ref being set only proves AuthorizeDebitMandate ran
+		// once, in the past — it says nothing about whether that consent
+		// is still active now. A worker who calls
+		// D2CBankLinkHandler.RevokeDebitMandate, or an employer who
+		// records a withdrawal via ConsentHandler.RecordConsent, changes
+		// nothing about this row's DebitMandateRef; HasActiveConsent
+		// against the append-only ConsentRecord table is what actually
+		// reflects either kind of withdrawal, and its own one-year
+		// ExpiresAt lapsing. This is the one check on this file's entire
+		// path that a real debit against a worker's own bank account must
+		// never skip.
+		if !models.HasActiveConsent(tx, orgID, adv.EmployeeID, models.ConsentTypeD2CDebitMandate) {
+			return ErrD2CConsentWithdrawn
+		}
 		mandateRef = *link.DebitMandateRef
 
 		var lastAttempt int

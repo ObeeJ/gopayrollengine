@@ -206,6 +206,8 @@ func SetupRouter() *gin.Engine {
 				d2cBankLink.POST("/initiate", d2cBankLinkHandler.InitiateLink)
 				d2cBankLink.POST("/complete", d2cBankLinkHandler.CompleteLink)
 				d2cBankLink.POST("/authorize-debit", d2cBankLinkHandler.AuthorizeDebit)
+				d2cBankLink.POST("/revoke", d2cBankLinkHandler.Revoke)
+				d2cBankLink.POST("/revoke-debit-mandate", d2cBankLinkHandler.RevokeDebitMandate)
 			}
 		}
 	}

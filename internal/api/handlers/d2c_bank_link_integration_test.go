@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"go-payroll-engine/internal/api/middleware"
 	"go-payroll-engine/internal/integrations/banklink"
@@ -208,4 +209,163 @@ func TestD2CBankLink_AllEndpointsRefuseWithNoProvider(t *testing.T) {
 		map[string]any{"consent": true})
 	h.AuthorizeDebit(c3)
 	assert.Equal(t, http.StatusServiceUnavailable, w3.Code, w3.Body.String())
+}
+
+// Revoke withdraws the whole link: read access (Status -> Revoked) and,
+// since a mandate was also outstanding, the debit-mandate consent too —
+// both as separate ConsentRecord rows, matching how CompleteLink and
+// AuthorizeDebit each recorded their own grant.
+func TestD2CBankLink_RevokeWithdrawsLinkAndBothConsents(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedD2CBankLinkWorker(t)
+	mock := banklink.NewMock()
+
+	w1, c1 := d2cWorkerRequest(t, "/api/v1/worker/d2c/bank-link/complete", orgID, employeeID,
+		map[string]any{"callback_token": "any-token", "consent": true})
+	NewD2CBankLinkHandler(mock).CompleteLink(c1)
+	require.Equal(t, http.StatusCreated, w1.Code, w1.Body.String())
+
+	w2, c2 := d2cWorkerRequest(t, "/api/v1/worker/d2c/bank-link/authorize-debit", orgID, employeeID,
+		map[string]any{"consent": true})
+	NewD2CBankLinkHandler(mock).AuthorizeDebit(c2)
+	require.Equal(t, http.StatusOK, w2.Code, w2.Body.String())
+
+	w3, c3 := d2cWorkerRequest(t, "/api/v1/worker/d2c/bank-link/revoke", orgID, employeeID, nil)
+	NewD2CBankLinkHandler(mock).Revoke(c3)
+	require.Equal(t, http.StatusOK, w3.Code, w3.Body.String())
+
+	var link models.D2CBankLink
+	require.NoError(t, models.DB.Where("employee_id = ?", employeeID).First(&link).Error)
+	assert.Equal(t, models.D2CBankLinkRevoked, link.Status)
+	assert.NotNil(t, link.RevokedAt)
+
+	var consents []models.ConsentRecord
+	require.NoError(t, models.DB.Where("employee_id = ? AND granted = false", employeeID).
+		Order("consent_type").Find(&consents).Error)
+	require.Len(t, consents, 2, "revoking a link with a mandate must withdraw both consents")
+	assert.Equal(t, models.ConsentTypeD2CBankLinkRead, consents[0].ConsentType)
+	assert.Equal(t, models.ConsentTypeD2CDebitMandate, consents[1].ConsentType)
+}
+
+// No debit mandate was ever authorized — Revoke must still withdraw the
+// read consent, and must not fabricate a debit-mandate withdrawal for a
+// consent that was never granted in the first place.
+func TestD2CBankLink_RevokeWithoutMandateOnlyWithdrawsReadConsent(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedD2CBankLinkWorker(t)
+	mock := banklink.NewMock()
+
+	w1, c1 := d2cWorkerRequest(t, "/api/v1/worker/d2c/bank-link/complete", orgID, employeeID,
+		map[string]any{"callback_token": "any-token", "consent": true})
+	NewD2CBankLinkHandler(mock).CompleteLink(c1)
+	require.Equal(t, http.StatusCreated, w1.Code, w1.Body.String())
+
+	w2, c2 := d2cWorkerRequest(t, "/api/v1/worker/d2c/bank-link/revoke", orgID, employeeID, nil)
+	NewD2CBankLinkHandler(mock).Revoke(c2)
+	require.Equal(t, http.StatusOK, w2.Code, w2.Body.String())
+
+	var consents []models.ConsentRecord
+	require.NoError(t, models.DB.Where("employee_id = ? AND granted = false", employeeID).Find(&consents).Error)
+	require.Len(t, consents, 1)
+	assert.Equal(t, models.ConsentTypeD2CBankLinkRead, consents[0].ConsentType)
+}
+
+func TestD2CBankLink_RevokeReturns404WithNoLinkedAccount(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedD2CBankLinkWorker(t)
+
+	w, c := d2cWorkerRequest(t, "/api/v1/worker/d2c/bank-link/revoke", orgID, employeeID, nil)
+	NewD2CBankLinkHandler(banklink.NewMock()).Revoke(c)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// Revoke must work even when the handler carries no provider — there's
+// nothing to call out to (it only ever touches our own records), and a
+// worker must always be able to withdraw consent, whether or not a live
+// provider happens to be configured right now. Seeds the link directly
+// since a nil provider can't run CompleteLink itself.
+func TestD2CBankLink_RevokeWorksEvenWithNilProvider(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedD2CBankLinkWorker(t)
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return tx.Create(&models.D2CBankLink{
+			OrganizationID:     orgID,
+			EmployeeID:         employeeID,
+			Provider:           "mock",
+			ProviderAccountRef: "mock-acct-nil-provider",
+			LinkedAt:           time.Now(),
+		}).Error
+	}))
+
+	w, c := d2cWorkerRequest(t, "/api/v1/worker/d2c/bank-link/revoke", orgID, employeeID, nil)
+	NewD2CBankLinkHandler(nil).Revoke(c)
+
+	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+}
+
+// RevokeDebitMandate must leave read access untouched — Status stays
+// Linked — since that consent is deliberately separate; only the mandate
+// itself and its own consent are withdrawn.
+func TestD2CBankLink_RevokeDebitMandateLeavesReadAccessIntact(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedD2CBankLinkWorker(t)
+	mock := banklink.NewMock()
+
+	w1, c1 := d2cWorkerRequest(t, "/api/v1/worker/d2c/bank-link/complete", orgID, employeeID,
+		map[string]any{"callback_token": "any-token", "consent": true})
+	NewD2CBankLinkHandler(mock).CompleteLink(c1)
+	require.Equal(t, http.StatusCreated, w1.Code, w1.Body.String())
+
+	w2, c2 := d2cWorkerRequest(t, "/api/v1/worker/d2c/bank-link/authorize-debit", orgID, employeeID,
+		map[string]any{"consent": true})
+	NewD2CBankLinkHandler(mock).AuthorizeDebit(c2)
+	require.Equal(t, http.StatusOK, w2.Code, w2.Body.String())
+
+	w3, c3 := d2cWorkerRequest(t, "/api/v1/worker/d2c/bank-link/revoke-debit-mandate", orgID, employeeID, nil)
+	NewD2CBankLinkHandler(mock).RevokeDebitMandate(c3)
+	require.Equal(t, http.StatusOK, w3.Code, w3.Body.String())
+
+	var link models.D2CBankLink
+	require.NoError(t, models.DB.Where("employee_id = ?", employeeID).First(&link).Error)
+	assert.Equal(t, models.D2CBankLinkLinked, link.Status, "read access must survive a debit-mandate-only revoke")
+	assert.Nil(t, link.DebitMandateRef)
+	assert.Nil(t, link.DebitAuthorizedAt)
+
+	var consents []models.ConsentRecord
+	require.NoError(t, models.DB.Where("employee_id = ? AND granted = false", employeeID).Find(&consents).Error)
+	require.Len(t, consents, 1)
+	assert.Equal(t, models.ConsentTypeD2CDebitMandate, consents[0].ConsentType)
+}
+
+// No mandate was ever authorized — a no-op, not an error, and no
+// withdrawal ConsentRecord for a consent that was never granted.
+func TestD2CBankLink_RevokeDebitMandateNoOpWhenNoMandateExists(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedD2CBankLinkWorker(t)
+	mock := banklink.NewMock()
+
+	w1, c1 := d2cWorkerRequest(t, "/api/v1/worker/d2c/bank-link/complete", orgID, employeeID,
+		map[string]any{"callback_token": "any-token", "consent": true})
+	NewD2CBankLinkHandler(mock).CompleteLink(c1)
+	require.Equal(t, http.StatusCreated, w1.Code, w1.Body.String())
+
+	w2, c2 := d2cWorkerRequest(t, "/api/v1/worker/d2c/bank-link/revoke-debit-mandate", orgID, employeeID, nil)
+	NewD2CBankLinkHandler(mock).RevokeDebitMandate(c2)
+	require.Equal(t, http.StatusOK, w2.Code, w2.Body.String())
+
+	var count int64
+	require.NoError(t, models.DB.Model(&models.ConsentRecord{}).
+		Where("employee_id = ? AND granted = false", employeeID).Count(&count).Error)
+	assert.Zero(t, count)
+}
+
+func TestD2CBankLink_RevokeDebitMandateReturns404WithNoLinkedAccount(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedD2CBankLinkWorker(t)
+
+	w, c := d2cWorkerRequest(t, "/api/v1/worker/d2c/bank-link/revoke-debit-mandate", orgID, employeeID, nil)
+	NewD2CBankLinkHandler(banklink.NewMock()).RevokeDebitMandate(c)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
 }

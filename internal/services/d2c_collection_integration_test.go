@@ -61,7 +61,11 @@ func seedD2CDisbursedAdvance(t *testing.T, amount money.Kobo) (orgID, employeeID
 }
 
 // seedD2CMandate links a bank account for employeeID and authorizes a debit
-// mandate on it via mock — the state InitiateD2CCollection requires.
+// mandate on it via mock, recording both consents a real
+// CompleteLink/AuthorizeDebit call would leave behind (InitiateD2CCollection
+// and the sweep's own re-prediction read each check HasActiveConsent
+// independently of the D2CBankLink row's own fields) — the full state a
+// debit collection attempt requires.
 func seedD2CMandate(t *testing.T, orgID, employeeID string, mock *banklink.Mock) *models.D2CBankLink {
 	t.Helper()
 	linked, err := mock.CompleteLink(context.Background(), "callback-token")
@@ -80,7 +84,25 @@ func seedD2CMandate(t *testing.T, orgID, employeeID string, mock *banklink.Mock)
 		LinkedAt:           now,
 	}
 	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
-		return tx.Create(&link).Error
+		if err := tx.Create(&link).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&models.ConsentRecord{
+			OrganizationID: orgID,
+			EmployeeID:     employeeID,
+			ConsentType:    models.ConsentTypeD2CBankLinkRead,
+			Granted:        true,
+			ConsentedAt:    now,
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&models.ConsentRecord{
+			OrganizationID: orgID,
+			EmployeeID:     employeeID,
+			ConsentType:    models.ConsentTypeD2CDebitMandate,
+			Granted:        true,
+			ConsentedAt:    now,
+		}).Error
 	}))
 	return &link
 }
@@ -152,6 +174,33 @@ func TestInitiateD2CCollection_RejectsNoMandate(t *testing.T) {
 
 	_, err = InitiateD2CCollection(context.Background(), orgID, advanceID, time.Now(), mock)
 	assert.ErrorIs(t, err, banklink.ErrNoMandate)
+}
+
+// link.DebitMandateRef is still set — nothing here touches the D2CBankLink
+// row at all — but a later ConsentRecord withdrew the debit-mandate
+// consent, the same row D2CBankLinkHandler.RevokeDebitMandate or an
+// employer's ConsentHandler.RecordConsent call would write. This is the
+// exact gap a multi-persona review found: before HasActiveConsent was
+// wired in here, a withdrawn consent recorded this way had no effect at
+// all, and this collection would have gone through.
+func TestInitiateD2CCollection_RejectsWithdrawnDebitConsentDespiteMandatePresent(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID, advanceID := seedD2CDisbursedAdvance(t, money.FromNaira(10_000))
+	mock := banklink.NewMock()
+	seedD2CMandate(t, orgID, employeeID, mock)
+
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return tx.Create(&models.ConsentRecord{
+			OrganizationID: orgID,
+			EmployeeID:     employeeID,
+			ConsentType:    models.ConsentTypeD2CDebitMandate,
+			Granted:        false,
+			ConsentedAt:    time.Now().Add(time.Second),
+		}).Error
+	}))
+
+	_, err := InitiateD2CCollection(context.Background(), orgID, advanceID, time.Now(), mock)
+	assert.ErrorIs(t, err, ErrD2CConsentWithdrawn)
 }
 
 func TestInitiateD2CCollection_RejectsSecondPendingAttempt(t *testing.T) {
@@ -357,6 +406,37 @@ func TestSweepD2CCollections_SkipsWhenNotDueYet(t *testing.T) {
 	require.NotNil(t, result, "this advance must appear in the sweep's results")
 	assert.NoError(t, result.Err)
 	assert.Nil(t, result.Collection, "nothing should be collected before the predicted payday arrives")
+}
+
+// Same gap as TestInitiateD2CCollection_RejectsWithdrawnDebitConsentDespiteMandatePresent,
+// but for the sweep's own re-prediction read: link.Status is still Linked
+// and DebitMandateRef is still set, but read consent was withdrawn. The
+// sweep must stop re-reading this worker's transaction history the moment
+// that happens, not only once it also reaches InitiateD2CCollection's own
+// debit-mandate check.
+func TestSweepD2CCollections_SkipsWithdrawnReadConsentDespiteLinkedStatus(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID, advanceID := seedD2CDisbursedAdvance(t, money.FromNaira(50_000))
+	mock := banklink.NewMock()
+	link := seedD2CMandate(t, orgID, employeeID, mock)
+	mock.Transactions[link.ProviderAccountRef] = recurringCredits(4, 30, 30, money.FromNaira(300_000))
+
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return tx.Create(&models.ConsentRecord{
+			OrganizationID: orgID,
+			EmployeeID:     employeeID,
+			ConsentType:    models.ConsentTypeD2CBankLinkRead,
+			Granted:        false,
+			ConsentedAt:    time.Now().Add(time.Second),
+		}).Error
+	}))
+
+	results, err := SweepD2CCollections(context.Background(), predictionNow, mock)
+	require.NoError(t, err)
+	result := findD2CSweepResult(results, advanceID)
+	require.NotNil(t, result, "this advance must appear in the sweep's results")
+	assert.ErrorIs(t, result.Err, ErrD2CConsentWithdrawn)
+	assert.Nil(t, result.Collection)
 }
 
 func TestSweepD2CCollections_SkipsAdvanceAlreadyInFlight(t *testing.T) {

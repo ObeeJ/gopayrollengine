@@ -297,10 +297,14 @@ Ledger, accrual, eligibility, guardrails, settlement, tenant isolation.
   (`internal/services/ewa_dependency.go`) returns tier-appropriate copy,
   always present from Elevated upward; `AdvanceHandler.GetEarnedWages`/
   `RequestAdvance` return it as `nudge` in every eligibility response.
-- ~~Accrual snapshot cron~~ — done: `AccrualSnapshotCollector`
-  (`internal/services/accrual_snapshot_collector.go`) populates
-  `ewa_accrual_snapshots`, wired to `cmd/api/main.go`'s `snapshot-accruals`
-  CLI mode — the same external-cron pattern every other batch job here uses.
+- ~~Accrual snapshot cron~~ — `AccrualSnapshotCollector`
+  (`internal/services/accrual_snapshot_collector.go`) populating
+  `ewa_accrual_snapshots` via `cmd/api/main.go`'s `snapshot-accruals` CLI
+  mode was done; the *cron* this bullet's own title promised was not —
+  that mode, like `reconcile` and `collect-evidence` below, only ever ran
+  when a human happened to invoke it by hand. Found during a multi-persona
+  review; see the `reconcile` bullet in Phase 3 for what actually
+  schedules all three now.
 - ~~Admin API for policy configuration~~ — done: `GET`/`PUT /api/v1/policy`
   (`PolicyHandler`, admin-role-gated on write).
 
@@ -313,7 +317,48 @@ Ledger, accrual, eligibility, guardrails, settlement, tenant isolation.
   (`ReconciliationAlertsTotal`) past a configurable threshold — a delta
   comparison, not absolute, since the wallet is shared across every org (see
   that file's own comment for why). Wired to `cmd/api/main.go`'s `reconcile`
-  CLI mode.
+  CLI mode — which, until now, was the whole story: nobody had actually
+  wired anything to *invoke* that mode automatically. Same gap for
+  `snapshot-accruals` and `collect-evidence`. All three were CLI modes an
+  operator had to remember to run by hand, indefinitely — flagged
+  independently during a multi-persona review, and confirmed by checking
+  `docker-compose.yml`: it starts `db`, `redis`, `api`, `worker`, and the
+  observability sidecars, and nothing else.
+
+  Fixed with a dedicated `scheduler` service (`docker-compose.yml`,
+  `Dockerfile.scheduler`) — a separate image from the API/worker's, because
+  that one is deliberately distroless (no shell, so no cron daemon can run
+  in it at all; see that Dockerfile's own comment). The scheduler image is
+  Alpine, running busybox `crond` against `config/scheduler-crontab`
+  (reconcile hourly, snapshot-accruals and collect-evidence daily — see
+  that file for the exact times and reasoning), which calls the same
+  static binary the API/worker containers run, one-shot, with `APP_MODE`
+  set per job. `collect-d2c-debits` is deliberately not in that crontab
+  yet: it refuses to run outside `MOCK_MODE` (no real banklink provider
+  exists), and would just `log.Fatal` on every scheduled run in
+  production for no benefit.
+
+  Caught a real bug in the process, not just missing infrastructure:
+  cron does not inherit `docker-compose`'s env vars automatically the way
+  a shell in the same container would, so each job needs its environment
+  handed to it explicitly. The first version of that env-passing script
+  used `IFS='=' read key value` to split each `KEY=VALUE` line — which
+  silently drops a *trailing* delimiter with nothing after it, truncating
+  the last character of any value ending in `=`. Both `ENCRYPTION_KEK` and
+  `ENCRYPTION_HMAC_KEY` are base64 and pad with trailing `=` — a scheduled
+  job would have started with a silently corrupted encryption key. Caught
+  by testing the script's actual output against a known value before
+  shipping it, not by reasoning about `read`'s semantics from memory;
+  fixed by splitting on the first `=` with parameter expansion
+  (`${line%%=*}` / `${line#*=}`) instead, which has no such edge case.
+
+  Not verified end-to-end against a real Docker daemon — this environment
+  doesn't have one (see this roadmap's own §0 on being straight about what
+  was and wasn't actually checked). `docker compose config` validates the
+  compose file itself and both scripts pass `sh -n`/`dash -n`, and the
+  env-capture script's actual output was tested directly, but nobody has
+  yet run `docker-compose up scheduler` against a live daemon and watched
+  a job fire. Do that before trusting this in production.
 - ~~Write-off path for terminated employees with outstanding advances~~ —
   done: `EmployeeTerminationService`/`TerminateEmployee` cancels any advance
   not yet disbursed and writes off any that were — there is no further

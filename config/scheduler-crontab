@@ -1,0 +1,44 @@
+# config/scheduler-crontab — busybox crond's root crontab, baked into
+# Dockerfile.scheduler at /etc/crontabs/root. Standard 5-field cron syntax;
+# times are UTC unless the scheduler container's TZ env var is set (the
+# image installs tzdata so that actually takes effect).
+#
+# Each line calls run-job.sh with the exact APP_MODE cmd/api/main.go's own
+# switch statement already handles — this file only decides *when*, all
+# the actual job logic already existed and was already tested before this
+# file did anything. See run-job.sh's own comment for why it's a wrapper
+# instead of calling /payroll-app directly.
+#
+# NOT scheduled here: collect-d2c-debits. main.go's own case for it refuses
+# to run at all unless MOCK_MODE=true — there is no real banklink debit
+# provider wired yet (see internal/integrations/banklink's package doc) —
+# and D2CHandler.Signup independently refuses new D2C signups under the
+# same condition, so there is nothing for this to collect against outside
+# MOCK_MODE anyway. Scheduling it here would just log.Fatal on every single
+# run in production. Add a line for it once a real banklink.DebitProvider
+# replaces banklink.NewMock() in routes.go — at that point this is a
+# one-line addition, not a redesign.
+
+# Reconciliation — hourly, five minutes past, so it never lands on exactly
+# :00 alongside whatever else in the stack schedules on the hour. Tight
+# enough that a real drift (a debit that succeeded on Monnify's side but
+# never got recorded, or vice versa) surfaces within the hour rather than
+# accumulating unnoticed; RECONCILIATION_DRIFT_THRESHOLD_KOBO (defaults to
+# ₦1,000, see .env.example) is what keeps ordinary rounding from paging
+# anyone at this frequency.
+5 * * * * /run-job.sh reconcile
+
+# SOC 2 evidence collection — daily, 02:15 UTC. Collects for *yesterday*
+# (see main.go's own comment on this case), so any hour after midnight
+# anywhere the org actually operates is fine; 02:15 just keeps it off the
+# top of the hour and out of the way of the two jobs below.
+15 2 * * * /run-job.sh collect-evidence
+
+# Accrual snapshots — daily, 17:30 UTC (18:30 WAT — Nigeria, this app's
+# primary market, is UTC+1). Deliberately late in the business day, not
+# early morning: main.go's own comment is explicit that the point is to
+# freeze what an eligibility decision *made that day* was actually based
+# on, before anything about the employee can change under it overnight —
+# an early-morning run would snapshot a day that had barely started.
+# Adjust if this deployment's employers mostly aren't on Lagos time.
+30 17 * * * /run-job.sh snapshot-accruals

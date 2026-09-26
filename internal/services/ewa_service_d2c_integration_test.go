@@ -97,6 +97,45 @@ func TestGetEligibility_D2CWorker_NoProviderConfiguredBlocks(t *testing.T) {
 	assert.Equal(t, DeclineNoIncomeHistory, el.BlockedReason)
 }
 
+// The exact state a freshly linked account is in through the real
+// InitiateLink/CompleteLink HTTP flow: linked, but never seeded with any
+// transaction at all (no map entry, not even an empty slice). This must
+// decline cleanly, the same as any other insufficient-history case — not
+// 500, which is what it did before banklink.Mock.GetTransactions stopped
+// treating an unseeded account as an error (see mock_test.go).
+func TestGetEligibility_D2CWorker_FreshlyLinkedAccountWithNoHistoryBlocksCleanly(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID, _ := seedD2CLinkedWorker(t)
+	svc := &EWAService{D2CProvider: banklink.NewMock()} // nothing seeded for any account
+
+	el, err := svc.GetEligibility(context.Background(), orgID, employeeID, predictionNow)
+	require.NoError(t, err)
+	assert.True(t, el.Blocked)
+	assert.Equal(t, DeclineNoIncomeHistory, el.BlockedReason)
+}
+
+// The same scenario as the test above, but through RequestAdvance — the
+// path that actually writes an ewa_advances row. eligibilityTx blocking
+// with DeclineNoIncomeHistory returns before ScoreDependency runs, so
+// without eligibilityTx defaulting Dependency.Tier to Healthy up front,
+// this 500ed on ewa_advances_dependency_tier_check instead of recording a
+// clean decline — reproduced live against a running server before being
+// fixed here.
+func TestRequestAdvance_D2CWorker_NoIncomeHistoryDeclinesCleanly(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID, _ := seedD2CLinkedWorker(t)
+	svc := &EWAService{D2CProvider: banklink.NewMock()}
+
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, money.FromNaira(5_000), "d2c-idem-no-history", "127.0.0.1")
+
+	require.ErrorIs(t, err, ErrAdvanceDeclined)
+	require.NotNil(t, advance)
+	assert.Equal(t, models.AdvanceDeclined, advance.Status)
+	assert.Equal(t, DeclineNoIncomeHistory, advance.DeclineReason)
+	assert.Equal(t, models.TierHealthy, advance.DependencyTier)
+}
+
 func TestGetEligibility_D2CWorker_InsufficientHistoryBlocks(t *testing.T) {
 	skipIfNoDB(t)
 	orgID, employeeID, accountRef := seedD2CLinkedWorker(t)

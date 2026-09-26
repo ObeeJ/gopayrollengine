@@ -342,6 +342,16 @@ func (s *EWAService) eligibilityTx(ctx context.Context, tx *gorm.DB, orgID, empl
 		MinimumDraw: policy.MinDrawKobo,
 		MaxDraws:    policy.MaxDrawsPerPeriod,
 	}
+	// Every early return below (policy disabled, inactive account, no
+	// salary/income basis) happens before ScoreDependency ever runs, which
+	// would otherwise leave Dependency.Tier at its Go zero value (""). That
+	// reaches RequestAdvance's decline-path INSERT as-is — and
+	// ewa_advances.dependency_tier has a CHECK constraint that rejects
+	// anything but the four real tier values, so an empty string 500s the
+	// request instead of recording a clean decline. A default of Healthy is
+	// also the semantically correct answer here: no dependency signal has
+	// been computed yet, which is indistinguishable from a healthy score.
+	el.Dependency.Tier = models.TierHealthy
 
 	if !policy.Enabled {
 		el.Blocked, el.BlockedReason = true, DeclineEWADisabled

@@ -497,12 +497,25 @@ more of the same. That is where the actual differentiation is:
     `CompleteLink` and `DebitProvider.AuthorizeDebitMandate`, each recording
     its own separate `ConsentRecord` (`d2c_bank_link_read` on complete,
     `d2c_debit_mandate` on authorize — never the same consent, per this
-    section's own design). Registered only when `MOCK_MODE=true`
-    (`routes.go`) — the same guard `collect-d2c-debits` already uses,
-    because exposing a `Mock`-backed linking flow to a real user in
-    production would hand them back a canned "success" for an account that
-    was never actually linked to anything. Remove that guard only once a
-    real `banklink.DebitProvider` replaces `banklink.NewMock()` there.
+    section's own design). `routes.go` always registers these routes now;
+    each handler method checks for a nil provider itself and answers with a
+    503 (`"bank-account linking has no live provider configured"`) rather
+    than relying on the route's very existence as the only signal that
+    linking is unavailable — the same reason `collect-d2c-debits` still
+    refuses to run outside `MOCK_MODE`. Remove that per-request check only
+    once a real `banklink.DebitProvider` replaces `banklink.NewMock()`
+    there.
+
+    This closes a real dead end, found live during a multi-persona review:
+    outside `MOCK_MODE`, `D2CHandler.Signup` used to succeed unconditionally
+    — a real worker got an org, an employee, a user row, and a live JWT —
+    and then hit a bare, unexplained 404 on every bank-link call afterward,
+    because the routes weren't registered at all without a provider.
+    Nothing ever told them signup had handed them a dead end. `Signup` now
+    checks the same `d2cProvider == nil` condition first and refuses new
+    D2C signups with the same 503 before creating anything, so a real user
+    is told upfront instead of being issued an identity that can never link
+    an account, get eligibility, or receive an advance.
   - ~~Eligibility computed from predicted income~~ — done.
     `EWAService.eligibilityTx` branches on `Organization.IsD2C` before the
     salaried/hourly split it already had: a D2C worker's `Employee.Salary`

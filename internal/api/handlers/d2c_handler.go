@@ -24,7 +24,24 @@ const pgUniqueViolation = "23505"
 // only handler in this package that creates an Organization rather than
 // assuming one already exists, since a D2C worker has no employer to have
 // created one for them.
-type D2CHandler struct{}
+type D2CHandler struct {
+	// BankLinkUnavailable — true when routes.go has no real banklink
+	// provider to wire up (i.e. outside MOCK_MODE; see its comment on
+	// d2cProvider). Zero value is false so existing construction sites
+	// keep today's behavior; routes.go sets this explicitly from the same
+	// d2cProvider == nil check that gates the bank-link routes below.
+	//
+	// Signup used to succeed unconditionally: a real user got an org,
+	// an employee, a user row, and a live JWT, then hit a bare 404 on
+	// every /worker/d2c/bank-link/* call afterward, because those routes
+	// were never registered without a provider. Nothing ever told them
+	// signup had handed them a dead end — found live during a
+	// multi-persona review, not by a passing test. Checking this first
+	// means a real user is told upfront, instead of being issued an
+	// identity that can never link an account, get eligibility, or
+	// receive an advance.
+	BankLinkUnavailable bool
+}
 
 // Signup — POST /api/v1/d2c/signup; public, no auth required (there is no
 // identity yet to authenticate). Creates a single-employee D2C organization
@@ -36,6 +53,11 @@ type D2CHandler struct{}
 // against, so this issues the token directly rather than routing through
 // /worker/auth/login.
 func (h *D2CHandler) Signup(c *gin.Context) {
+	if h.BankLinkUnavailable {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "d2c signup is not available yet — bank-account linking has no live provider configured"})
+		return
+	}
+
 	var req struct {
 		Name          string         `json:"name" binding:"required"`
 		Phone         string         `json:"phone" binding:"required"`

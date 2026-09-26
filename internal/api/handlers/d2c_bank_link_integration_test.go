@@ -186,3 +186,26 @@ func TestD2CBankLink_AuthorizeDebitRejectsMissingConsent(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w2.Code)
 }
+
+// With no real provider configured — routes.go passes a nil d2cProvider
+// through outside MOCK_MODE — every endpoint must answer with a clean 503
+// instead of dereferencing a nil provider or, as it did before routes.go
+// registered this group unconditionally, not existing at all (a bare 404
+// with no explanation). None of these touch the DB, so no skipIfNoDB.
+func TestD2CBankLink_AllEndpointsRefuseWithNoProvider(t *testing.T) {
+	h := NewD2CBankLinkHandler(nil)
+
+	w1, c1 := d2cWorkerRequest(t, "/api/v1/worker/d2c/bank-link/initiate", "ORG-x", "EMP-x", nil)
+	h.InitiateLink(c1)
+	assert.Equal(t, http.StatusServiceUnavailable, w1.Code, w1.Body.String())
+
+	w2, c2 := d2cWorkerRequest(t, "/api/v1/worker/d2c/bank-link/complete", "ORG-x", "EMP-x",
+		map[string]any{"callback_token": "any-token", "consent": true})
+	h.CompleteLink(c2)
+	assert.Equal(t, http.StatusServiceUnavailable, w2.Code, w2.Body.String())
+
+	w3, c3 := d2cWorkerRequest(t, "/api/v1/worker/d2c/bank-link/authorize-debit", "ORG-x", "EMP-x",
+		map[string]any{"consent": true})
+	h.AuthorizeDebit(c3)
+	assert.Equal(t, http.StatusServiceUnavailable, w3.Code, w3.Body.String())
+}

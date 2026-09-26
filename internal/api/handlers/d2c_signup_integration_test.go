@@ -164,3 +164,16 @@ func TestD2CSignup_RejectsMissingRequiredFields(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, w.Code, "missing %s should 400", field)
 	}
 }
+
+// Signup must refuse outright when there is no live bank-link provider to
+// hand the worker off to next, rather than creating an org, an employee, a
+// user, and a live JWT that all lead to a dead end on the very next call.
+// No DB is touched here — the check runs before anything is created — so
+// this doesn't need skipIfNoDB.
+func TestD2CSignup_RefusesWhenBankLinkUnavailable(t *testing.T) {
+	body := validD2CSignupBody()
+	w, c := d2cSignupRequest(t, body)
+
+	(&D2CHandler{BankLinkUnavailable: true}).Signup(c)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+}

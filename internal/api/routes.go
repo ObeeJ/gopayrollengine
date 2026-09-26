@@ -69,7 +69,7 @@ func SetupRouter() *gin.Engine {
 	webhookHandler := &handlers.WebhookHandler{}
 	consentHandler := &handlers.ConsentHandler{}
 	complianceHandler := &handlers.ComplianceHandler{}
-	d2cHandler := &handlers.D2CHandler{}
+	d2cHandler := &handlers.D2CHandler{BankLinkUnavailable: d2cProvider == nil}
 	dashboardHandler := handlers.NewDashboardHandler(services.NewEmployerDashboardService(empRepo))
 
 	v1 := r.Group("/api/v1")
@@ -187,22 +187,25 @@ func SetupRouter() *gin.Engine {
 			worker.POST("/time-entries", timeEntryHandler.SubmitTimeEntry)
 			worker.GET("/time-entries", timeEntryHandler.GetTimeEntries)
 
-			// D2C bank-link + debit-mandate — only registered under
-			// MOCK_MODE. There's no real aggregator (Mono/Okra) wired to
-			// banklink.DebitProvider yet, and exposing a Mock-backed
-			// linking flow to a real user in production would let them
-			// "link" an account and get back canned success — the same
-			// reason cmd/api/main.go's collect-d2c-debits mode refuses to
-			// run outside MOCK_MODE. Remove this gate only once d2cProvider
-			// above is a real provider.
-			if d2cProvider != nil {
-				d2cBankLinkHandler := handlers.NewD2CBankLinkHandler(d2cProvider)
-				d2cBankLink := worker.Group("/d2c/bank-link")
-				{
-					d2cBankLink.POST("/initiate", d2cBankLinkHandler.InitiateLink)
-					d2cBankLink.POST("/complete", d2cBankLinkHandler.CompleteLink)
-					d2cBankLink.POST("/authorize-debit", d2cBankLinkHandler.AuthorizeDebit)
-				}
+			// D2C bank-link + debit-mandate — registered unconditionally so
+			// the API is self-describing: a real client gets a clean 503
+			// from D2CBankLinkHandler's own nil-provider check, not a bare
+			// route-not-found. d2cProvider is only ever a real provider
+			// under MOCK_MODE today — there's no real aggregator (Mono/
+			// Okra) wired to banklink.DebitProvider yet, and exposing a
+			// Mock-backed linking flow to a real user in production would
+			// let them "link" an account and get back canned success, the
+			// same reason cmd/api/main.go's collect-d2c-debits mode refuses
+			// to run outside MOCK_MODE. D2CHandler.Signup above already
+			// refuses new D2C signups while d2cProvider is nil, so this
+			// gap only matters for accounts that signed up back when a
+			// provider was configured and then it was removed.
+			d2cBankLinkHandler := handlers.NewD2CBankLinkHandler(d2cProvider)
+			d2cBankLink := worker.Group("/d2c/bank-link")
+			{
+				d2cBankLink.POST("/initiate", d2cBankLinkHandler.InitiateLink)
+				d2cBankLink.POST("/complete", d2cBankLinkHandler.CompleteLink)
+				d2cBankLink.POST("/authorize-debit", d2cBankLinkHandler.AuthorizeDebit)
 			}
 		}
 	}

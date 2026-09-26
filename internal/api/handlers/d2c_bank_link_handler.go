@@ -15,22 +15,40 @@ import (
 // D2CBankLinkHandler — worker-facing endpoints for linking a bank account
 // for read access (payday prediction) and, as a later and separate step,
 // authorizing that same account to be debited. Backed by whatever
-// banklink.DebitProvider it's constructed with; see routes.go's comment on
-// why these routes are only ever registered under MOCK_MODE today — there
-// is no real aggregator to point a live user's linking flow at yet.
+// banklink.DebitProvider it's constructed with. provider is nil outside
+// MOCK_MODE today — there is no real aggregator to point a live user's
+// linking flow at yet — and every handler below checks for that explicitly
+// and returns a clean 503 rather than assuming a provider is always
+// present; that's what lets routes.go register these routes
+// unconditionally instead of making their very existence the only signal
+// that linking is unavailable.
 type D2CBankLinkHandler struct {
 	provider banklink.DebitProvider
 }
 
-// NewD2CBankLinkHandler — wires up the handler with its provider.
+// NewD2CBankLinkHandler — wires up the handler with its provider. provider
+// may be nil; see the struct doc comment.
 func NewD2CBankLinkHandler(provider banklink.DebitProvider) *D2CBankLinkHandler {
 	return &D2CBankLinkHandler{provider: provider}
+}
+
+// errBankLinkUnavailable writes the shared 503 for a nil provider. Returns
+// true if it wrote a response (caller must return immediately after).
+func (h *D2CBankLinkHandler) errBankLinkUnavailable(c *gin.Context) bool {
+	if h.provider != nil {
+		return false
+	}
+	c.JSON(http.StatusServiceUnavailable, gin.H{"error": "bank-account linking has no live provider configured"})
+	return true
 }
 
 // InitiateLink — POST /api/v1/worker/d2c/bank-link/initiate; starts a link
 // flow with the underlying aggregator and hands back whatever the worker's
 // client needs to complete it on the aggregator's own UI.
 func (h *D2CBankLinkHandler) InitiateLink(c *gin.Context) {
+	if h.errBankLinkUnavailable(c) {
+		return
+	}
 	employeeID := middleware.EmployeeID(c)
 
 	session, err := h.provider.InitiateLink(c.Request.Context(), employeeID)
@@ -54,6 +72,10 @@ func (h *D2CBankLinkHandler) InitiateLink(c *gin.Context) {
 // authorization consent below; see migration 000030/000031's comments on
 // why linking and debit authorization must never share one consent.
 func (h *D2CBankLinkHandler) CompleteLink(c *gin.Context) {
+	if h.errBankLinkUnavailable(c) {
+		return
+	}
+
 	var req struct {
 		CallbackToken string `json:"callback_token" binding:"required"`
 		Consent       bool   `json:"consent" binding:"required"`
@@ -113,6 +135,10 @@ func (h *D2CBankLinkHandler) CompleteLink(c *gin.Context) {
 // D2CBankLinkLinked status; there is nothing to authorize a debit against
 // otherwise.
 func (h *D2CBankLinkHandler) AuthorizeDebit(c *gin.Context) {
+	if h.errBankLinkUnavailable(c) {
+		return
+	}
+
 	var req struct {
 		Consent bool `json:"consent" binding:"required"`
 	}

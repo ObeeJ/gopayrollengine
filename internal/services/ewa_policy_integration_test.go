@@ -47,6 +47,50 @@ func TestUpdatePolicy_FirstEverConfigurationPersists(t *testing.T) {
 	assert.Equal(t, 40, reloaded.MaxAccrualPct)
 }
 
+// Enabled and CoolingOffHours are the two EWAPolicy fields whose Go zero
+// value (false, 0) is a legitimate, documented request — "turn EWA off",
+// "no cooling-off period" — not "caller left this unset". Both used to
+// carry a `gorm:"default:..."` tag matching their non-zero default, which
+// made GORM's own create/upsert callback silently overwrite the zero value
+// back to that default in the struct itself before it ever reached SQL:
+// UpdatePolicy would report success and the persisted row would say
+// otherwise. Reproduced live against a running server (disabling EWA for
+// an org did nothing) before being fixed in internal/models/ewa.go — these
+// two tests are the permanent regression coverage for that fix.
+
+func TestUpdatePolicy_DisablingEWAActuallyPersists(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, _ := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	// Establish a row first — the bug reproduced on both a brand-new row
+	// and an already-existing one, so exercise the existing-row path here.
+	_, err := svc.UpdatePolicy(context.Background(), orgID, PolicyUpdate{MaxAccrualPct: intPtr(40)}, "127.0.0.1")
+	require.NoError(t, err)
+
+	updated, err := svc.UpdatePolicy(context.Background(), orgID, PolicyUpdate{Enabled: boolPtr(false)}, "127.0.0.1")
+	require.NoError(t, err)
+	assert.False(t, updated.Enabled, "UpdatePolicy's own in-memory result must reflect the disable")
+
+	var row models.EWAPolicy
+	require.NoError(t, models.DB.First(&row, "organization_id = ?", orgID).Error)
+	assert.False(t, row.Enabled, "the persisted row must actually be disabled")
+}
+
+func TestUpdatePolicy_ZeroCoolingOffHoursActuallyPersists(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, _ := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	updated, err := svc.UpdatePolicy(context.Background(), orgID, PolicyUpdate{CoolingOffHours: intPtr(0)}, "127.0.0.1")
+	require.NoError(t, err)
+	assert.Equal(t, 0, updated.CoolingOffHours)
+
+	var row models.EWAPolicy
+	require.NoError(t, models.DB.First(&row, "organization_id = ?", orgID).Error)
+	assert.Equal(t, 0, row.CoolingOffHours)
+}
+
 // A second update must change only what it touches — the whole point of
 // PolicyUpdate's pointer fields being optional.
 func TestUpdatePolicy_PartialUpdateLeavesOtherFieldsUntouched(t *testing.T) {

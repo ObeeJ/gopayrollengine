@@ -125,6 +125,17 @@ func (s *EWAService) UpdatePolicy(ctx context.Context, orgID string, upd PolicyU
 		// in-memory default when no row exists yet, so this is the same
 		// write whether it's the org's first-ever configuration or its
 		// hundredth update.
+		//
+		// EWAPolicy.Enabled and .CoolingOffHours deliberately carry no
+		// `gorm:"default:..."` tag — see their own comments in
+		// internal/models/ewa.go. With one, GORM's create/upsert callbacks
+		// overwrite a Go zero value (false, 0) back to the tag's default
+		// in the struct itself before this even reaches SQL, which made
+		// "disable EWA" and "no cooling-off period" permanent no-ops:
+		// UpdatePolicy would report success and the database would still
+		// hold the old value. Caught live against a running server, not by
+		// a passing test — no existing test called UpdatePolicy with
+		// Enabled:false or CoolingOffHours:0 and re-read the row after.
 		if err := tx.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "organization_id"}},
 			UpdateAll: true,

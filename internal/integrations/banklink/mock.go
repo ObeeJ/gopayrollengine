@@ -2,7 +2,6 @@ package banklink
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"go-payroll-engine/pkg/money"
@@ -19,7 +18,13 @@ import (
 // Transactions is keyed by providerAccountRef and returned verbatim by
 // GetTransactions — tests set it up directly rather than driving it through
 // InitiateLink/CompleteLink, since those two just fabricate a plausible
-// session/account and carry nothing a test would want to control.
+// session/account and carry nothing a test would want to control. An
+// account with no entry returns zero transactions, not an error — a real
+// aggregator gives exactly that for any account it has genuinely never
+// observed a transaction on (a freshly linked one, most obviously), and a
+// caller that treated "no data yet" as a hard failure would 500 every real
+// worker's first eligibility check right after linking. See
+// TestGetTransactions_UnseededAccountReturnsEmptyNotError.
 type Mock struct {
 	Transactions map[string][]Transaction
 
@@ -45,8 +50,9 @@ type DebitCall struct {
 	Reference  string
 }
 
-// NewMock builds an empty Mock; set .Transactions before calling
-// GetTransactions in a test.
+// NewMock builds an empty Mock. Set .Transactions before calling
+// GetTransactions in a test that needs specific history; an unset account
+// simply has none.
 func NewMock() *Mock {
 	return &Mock{
 		Transactions: map[string][]Transaction{},
@@ -78,10 +84,7 @@ func (m *Mock) CompleteLink(ctx context.Context, callbackToken string) (LinkedAc
 }
 
 func (m *Mock) GetTransactions(ctx context.Context, providerAccountRef string, since time.Time) ([]Transaction, error) {
-	all, ok := m.Transactions[providerAccountRef]
-	if !ok {
-		return nil, fmt.Errorf("banklink mock: no transactions seeded for %q", providerAccountRef)
-	}
+	all := m.Transactions[providerAccountRef]
 	filtered := make([]Transaction, 0, len(all))
 	for _, tx := range all {
 		if !tx.Date.Before(since) {

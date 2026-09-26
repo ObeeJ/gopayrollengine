@@ -87,13 +87,30 @@ const (
 // EWAPolicy — per-org guardrail configuration.
 type EWAPolicy struct {
 	OrganizationID string `gorm:"primaryKey" json:"organization_id"`
-	Enabled        bool   `gorm:"default:true" json:"enabled"`
 
-	MaxAccrualPct      int        `gorm:"default:50" json:"max_accrual_pct"`
-	AbsoluteCapKobo    money.Kobo `gorm:"column:absolute_cap_kobo;type:bigint" json:"absolute_cap_kobo"`
-	MinDrawKobo        money.Kobo `gorm:"column:min_draw_kobo;type:bigint" json:"min_draw_kobo"`
-	MaxDrawsPerPeriod  int        `gorm:"default:4" json:"max_draws_per_period"`
-	CoolingOffHours    int        `gorm:"default:24" json:"cooling_off_hours"`
+	// Enabled deliberately carries no `gorm:"default:..."` tag, even though
+	// the column itself defaults to true at the DB level (migration
+	// 000014). With one, GORM's own create/upsert callbacks treat this
+	// field's Go zero value (false) as "caller didn't set this" and
+	// silently overwrite it back to the default — in the struct itself,
+	// not just in the generated SQL — which made UpdatePolicy's
+	// Enabled: false request a permanent no-op (see that file's own
+	// comment on the upsert). DefaultEWAPolicy sets this explicitly in Go,
+	// so nothing depends on GORM ever filling it in.
+	Enabled bool `json:"enabled"`
+
+	MaxAccrualPct     int        `gorm:"default:50" json:"max_accrual_pct"`
+	AbsoluteCapKobo   money.Kobo `gorm:"column:absolute_cap_kobo;type:bigint" json:"absolute_cap_kobo"`
+	MinDrawKobo       money.Kobo `gorm:"column:min_draw_kobo;type:bigint" json:"min_draw_kobo"`
+	MaxDrawsPerPeriod int        `gorm:"default:4" json:"max_draws_per_period"`
+	// CoolingOffHours carries no `gorm:"default:..."` tag — same reason as
+	// Enabled above. Unlike MaxAccrualPct/MaxDrawsPerPeriod (whose own
+	// UpdatePolicy validation rejects 0 as out of range, so their zero
+	// value can never actually reach this field), 0 is UpdatePolicy's own
+	// documented way to ask for no cooling-off period at all — exactly the
+	// Go zero value GORM's default-tag callback would silently overwrite
+	// back to 24.
+	CoolingOffHours    int        `json:"cooling_off_hours"`
 	EmergencyFloorKobo money.Kobo `gorm:"column:emergency_floor_kobo;type:bigint" json:"emergency_floor_kobo"`
 
 	// RequireFundingCoverage gates approval on the org having deposited at

@@ -250,6 +250,70 @@ func TestRequestAdvance_OverEarningsIsDeclinedAndRecorded(t *testing.T) {
 	}))
 }
 
+// RequestAdvance's decline path persists DependencyTier straight from
+// el.Dependency.Tier — but policy-disabled, inactive-account, and
+// no-salary-on-file all return from eligibilityTx before ScoreDependency
+// ever runs (see eligibilityTx's early-return blocks), so before
+// el.Dependency.Tier defaulted to Healthy, this was Go's zero value "" —
+// which ewa_advances.dependency_tier's CHECK constraint rejects outright,
+// turning a routine decline into a 500. Existing coverage for these three
+// reasons only ever called GetEligibility, never RequestAdvance, so this
+// never surfaced. Each of the next three tests calls RequestAdvance
+// specifically, because that's the path that actually writes the row.
+
+func TestRequestAdvance_PolicyDisabledDeclinesCleanly(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	require.NoError(t, models.DB.Create(&models.EWAPolicy{
+		OrganizationID:  orgID,
+		Enabled:         false,
+		AbsoluteCapKobo: money.FromNaira(200_000),
+		MinDrawKobo:     money.FromNaira(1_000),
+	}).Error)
+	svc := NewEWAService()
+
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, money.FromNaira(10_000), "idem-disabled", "127.0.0.1")
+
+	require.ErrorIs(t, err, ErrAdvanceDeclined)
+	require.NotNil(t, advance)
+	assert.Equal(t, models.AdvanceDeclined, advance.Status)
+	assert.Equal(t, DeclineEWADisabled, advance.DeclineReason)
+	assert.Equal(t, models.TierHealthy, advance.DependencyTier)
+}
+
+func TestRequestAdvance_InactiveAccountDeclinesCleanly(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	require.NoError(t, models.DB.Model(&models.Employee{}).Where("id = ?", employeeID).
+		Update("is_active", false).Error)
+	svc := NewEWAService()
+
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, money.FromNaira(10_000), "idem-inactive", "127.0.0.1")
+
+	require.ErrorIs(t, err, ErrAdvanceDeclined)
+	require.NotNil(t, advance)
+	assert.Equal(t, models.AdvanceDeclined, advance.Status)
+	assert.Equal(t, DeclineInactiveAccount, advance.DeclineReason)
+	assert.Equal(t, models.TierHealthy, advance.DependencyTier)
+}
+
+func TestRequestAdvance_NoSalaryOnFileDeclinesCleanly(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, 0)
+	svc := NewEWAService()
+
+	advance, _, err := svc.RequestAdvance(
+		context.Background(), orgID, employeeID, money.FromNaira(10_000), "idem-nosalary", "127.0.0.1")
+
+	require.ErrorIs(t, err, ErrAdvanceDeclined)
+	require.NotNil(t, advance)
+	assert.Equal(t, models.AdvanceDeclined, advance.Status)
+	assert.Equal(t, DeclineNoSalaryOnFile, advance.DeclineReason)
+	assert.Equal(t, models.TierHealthy, advance.DependencyTier)
+}
+
 func TestRequestAdvance_IsIdempotent(t *testing.T) {
 	skipIfNoDB(t)
 	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))

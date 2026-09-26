@@ -317,6 +317,37 @@ APP_MODE=worker go run cmd/api/main.go
 
 <br />
 
+## Scheduled jobs
+
+<br />
+
+Three background jobs — accrual snapshots, hourly reconciliation, and daily
+SOC 2 evidence collection — are each just another `APP_MODE` (see
+`cmd/api/main.go`'s switch statement), and `docker-compose up` runs all of
+them on schedule via a dedicated `scheduler` service:
+
+```bash
+docker-compose up scheduler
+```
+
+It's a separate image (`Dockerfile.scheduler`) from the API/worker's
+distroless one, built from the same static binary but on Alpine so it can
+run `crond` — the main image has no shell and can't. The schedule itself
+lives in `config/scheduler-crontab`; see its own comments for the times
+chosen and for why `collect-d2c-debits` isn't scheduled yet (no live
+banklink aggregator to run it against outside `MOCK_MODE`).
+
+```bash
+# See what actually ran and when
+docker-compose logs -f scheduler
+```
+
+<br />
+
+---
+
+<br />
+
 ## API
 
 <br />

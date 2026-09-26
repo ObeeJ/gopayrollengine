@@ -52,24 +52,29 @@ func main() {
 	case "worker":
 		startWorker(cfg.RedisURL)
 	case "collect-evidence":
-		// Run the SOC 2 evidence collector for yesterday — wire this to a daily cron.
+		// Run the SOC 2 evidence collector for yesterday — scheduled daily
+		// at 02:15 UTC by the scheduler service (Dockerfile.scheduler,
+		// config/scheduler-crontab). Nothing invoked this on its own before
+		// that existed; a human had to run it by hand.
 		collector := services.NewEvidenceCollector()
 		if err := collector.Collect(time.Now().AddDate(0, 0, -1)); err != nil {
 			log.Fatal("Evidence collection failed:", err)
 		}
 	case "snapshot-accruals":
-		// Wire this to a daily cron too. Snapshots today's accrual, not
-		// yesterday's — the point is to freeze what an eligibility decision
-		// made today was actually based on, before anything about the
-		// employee (salary, hours approved since) can change under it.
+		// Scheduled daily at 17:30 UTC by the scheduler service — see
+		// config/scheduler-crontab's own comment on why late in the day,
+		// not early morning. Snapshots today's accrual, not yesterday's —
+		// the point is to freeze what an eligibility decision made today
+		// was actually based on, before anything about the employee
+		// (salary, hours approved since) can change under it.
 		collector := services.NewAccrualSnapshotCollector()
 		if err := collector.Collect(context.Background(), time.Now()); err != nil {
 			log.Fatal("Accrual snapshot failed:", err)
 		}
 	case "reconcile":
-		// Wire this to a cron too — hourly or daily depending on how much
-		// drift is tolerable before it goes unnoticed. Threshold defaults to
-		// ₦1,000: tight enough to catch a real problem, loose enough that
+		// Scheduled hourly (5 minutes past) by the scheduler service —
+		// see config/scheduler-crontab. Threshold defaults to ₦1,000:
+		// tight enough to catch a real problem, loose enough that
 		// ordinary rounding across many orgs' balances doesn't page anyone.
 		thresholdKobo := money.FromNaira(1_000)
 		if raw := os.Getenv("RECONCILIATION_DRIFT_THRESHOLD_KOBO"); raw != "" {
@@ -86,11 +91,12 @@ func main() {
 			log.Printf("reconciliation ALERTED: drift=%v", *run.DriftKobo)
 		}
 	case "collect-d2c-debits":
-		// Wire this to a daily cron too, once a real banklink debit provider
-		// exists — no live aggregator is wired yet (see
-		// internal/integrations/banklink's package doc), so this mode only
-		// runs under MOCK_MODE, the same guard that keeps mock money out of
-		// production everywhere else in this file.
+		// Deliberately not in config/scheduler-crontab yet — see its own
+		// comment on why — until a real banklink debit provider exists.
+		// No live aggregator is wired yet (see internal/integrations/
+		// banklink's package doc), so this mode only runs under MOCK_MODE,
+		// the same guard that keeps mock money out of production
+		// everywhere else in this file.
 		if os.Getenv("MOCK_MODE") != "true" {
 			log.Fatal("collect-d2c-debits: no real banklink debit provider is wired yet — refusing to run outside MOCK_MODE")
 		}

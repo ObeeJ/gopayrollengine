@@ -1,0 +1,88 @@
+# syntax=docker/dockerfile:1.7
+#
+# Scheduler image for the background jobs cmd/api/main.go's own comments
+# each say to "wire this to a cron" (snapshot-accruals, reconcile,
+# collect-evidence) and never were. A separate image from the main
+# Dockerfile, not an extra stage bolted onto it, because the main image is
+# deliberately distroless (no shell, no cron daemon possible) — see its own
+# comment on why. This one trades that hardening for the ability to run
+# crond, on the theory that a container whose only job is "wake up on a
+# schedule and exec the same static binary this repo already ships" is a
+# much smaller attack surface than the API or worker processes, so it can
+# afford a real (if minimal) userland.
+#
+# Builds the exact same static binary the main Dockerfile does — see that
+# file's own comments on the build flags and the Go 1.26 toolchain pin —
+# so this only ever runs code that's already shipped and tested elsewhere;
+# nothing job-specific is compiled in here.
+
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download -x
+
+COPY . .
+
+ARG TARGETOS
+ARG TARGETARCH
+
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build \
+        -trimpath \
+        -tags netgo,osusergo \
+        -ldflags '-s -w -buildid=' \
+        -o /out/payroll-app \
+        ./cmd/api
+
+# ---------- runtime stage -------------------------------------------------
+# Alpine, not distroless: busybox's crond is what actually runs the jobs,
+# and there is no cron daemon (and no shell to invoke one with) in a
+# distroless image. ca-certificates is needed for the same outbound HTTPS
+# calls (Monnify, Dojah) the main image gets from distroless/static's
+# bundled certs instead; tzdata lets an operator set TZ to something other
+# than UTC without changing the crontab's own times.
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates tzdata
+
+COPY --from=builder /src/internal/db/migrations /internal/db/migrations
+COPY --from=builder /out/payroll-app /payroll-app
+
+# The crontab and the two scripts around it. scheduler-entrypoint.sh
+# captures this container's own environment (docker compose's env_file +
+# environment: block) to a file at startup, before crond ever runs a job,
+# so run-job.sh can source it explicitly rather than depending on crond's
+# own env-forwarding behavior — see that script's own comment. run-job.sh
+# itself just turns "$1" into APP_MODE before handing off to the binary,
+# and sends the job's own stdout/stderr to the container's own (fd 1/2 of
+# PID 1), since crond by default swallows a job's output rather than
+# logging it — without that redirect, `docker compose logs scheduler`
+# would show nothing ever ran.
+COPY config/scheduler-crontab /etc/crontabs/root
+COPY scripts/run-job.sh /run-job.sh
+COPY scripts/scheduler-entrypoint.sh /scheduler-entrypoint.sh
+RUN chmod 0600 /etc/crontabs/root && chmod 0755 /run-job.sh /scheduler-entrypoint.sh
+
+ARG VCS_REF=dev
+ARG BUILD_DATE=unknown
+ARG VERSION=dev
+LABEL org.opencontainers.image.title="go-payroll-engine-scheduler"
+LABEL org.opencontainers.image.description="Cron runner for the payroll engine's background jobs (accrual snapshots, reconciliation, SOC 2 evidence collection)."
+LABEL org.opencontainers.image.source="https://github.com/ObeeJ/gopayrollengine"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.vendor="ObeeJ"
+LABEL org.opencontainers.image.revision="${VCS_REF}"
+LABEL org.opencontainers.image.created="${BUILD_DATE}"
+LABEL org.opencontainers.image.version="${VERSION}"
+
+# scheduler-entrypoint.sh execs crond itself once it's captured the
+# environment — see its own comment — so crond still ends up as PID 1 and
+# `docker stop` still reaches it directly. Its own -f (foreground) and
+# -l 8 (busybox crond's log levels run opposite vixie-cron's — lower is
+# louder — 8 is its own default "log everything") flags are set there.
+CMD ["/scheduler-entrypoint.sh"]

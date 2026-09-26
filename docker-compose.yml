@@ -129,6 +129,41 @@ services:
       - MIGRATIONS_PATH=file:///internal/db/migrations
     restart: unless-stopped
 
+  # cmd/api/main.go has four background-job CLI modes; each of their own
+  # comments says to "wire this to a cron" and, until this service, nothing
+  # ever did — every one of them only ever ran when an operator happened to
+  # invoke it by hand. Built from Dockerfile.scheduler (Alpine + busybox
+  # crond), not the main distroless image, since that image has no shell
+  # and cannot run a cron daemon at all — see that Dockerfile's own comment.
+  # Schedule lives in config/scheduler-crontab, which also explains why
+  # collect-d2c-debits is deliberately not included here yet.
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.scheduler
+      args:
+        VCS_REF: ${VCS_REF:-dev}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+        VERSION: ${VERSION:-dev}
+    container_name: payroll_scheduler
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # Every job runs the same binary as api/worker, just one-shot with a
+      # different APP_MODE (set per job by run-job.sh, not here) — same
+      # DB role, same RLS enforcement, same migration-on-startup path.
+      - DATABASE_URL=postgres://payroll_app:${POSTGRES_APP_PASSWORD}@db:5432/${POSTGRES_DB:-payroll_db}?sslmode=disable
+      - MIGRATION_DATABASE_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-payroll_db}?sslmode=disable
+      - REDIS_URL=redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - MIGRATIONS_PATH=file:///internal/db/migrations
+    restart: unless-stopped
+
   # --- Observability stack ---
 
   prometheus:

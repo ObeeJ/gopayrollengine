@@ -20,6 +20,8 @@ var (
 	ErrTimeEntryInvalidRange    = errors.New("time entry: minutes worked must be between 1 and 1440")
 	ErrTimeEntryAlreadyResolved = errors.New("time entry: already approved or rejected")
 	ErrTimeEntryInvalidShift    = errors.New("time entry: shift_type must be regular, night, weekend, or holiday")
+	ErrTimeEntryDayOverflow     = errors.New("time entry: total minutes for this day would exceed 24 hours")
+	ErrTimeEntryInactive        = errors.New("time entry: employee is no longer active")
 )
 
 var validShiftTypes = map[models.TimeEntryShiftType]bool{
@@ -32,6 +34,23 @@ var validShiftTypes = map[models.TimeEntryShiftType]bool{
 // maxMinutesPerEntry mirrors the CHECK constraint in migration 000018: a
 // single entry longer than 24h is a data error, not a long shift.
 const maxMinutesPerEntry = 1440
+
+// lockEmployeeDay serialises every write that changes an employee's minutes
+// for one work date, so two concurrent submissions (or approvals) can't each
+// pass the 24h check against the same starting total.
+func lockEmployeeDay(tx *gorm.DB, employeeID string, day time.Time) error {
+	return tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+		"time_entry:"+employeeID+":"+day.Format("2006-01-02")).Error
+}
+
+// dayMinutes sums an employee's minutes on one work date across statuses.
+func dayMinutes(tx *gorm.DB, employeeID string, day time.Time, statuses []models.TimeEntryStatus, excludeID string) (int, error) {
+	var total int
+	err := tx.Model(&models.TimeEntry{}).
+		Where("employee_id = ? AND work_date = ? AND status IN ? AND id <> ?", employeeID, day, statuses, excludeID).
+		Select("COALESCE(SUM(minutes_worked), 0)").Scan(&total).Error
+	return total, err
+}
 
 // TimeEntryService owns the hourly/gig timesheet lifecycle: a worker submits
 // hours, an admin approves or rejects them, and only approved minutes ever
@@ -73,6 +92,24 @@ func (s *TimeEntryService) SubmitTimeEntry(
 		if !emp.IsHourly() {
 			return ErrTimeEntryNotHourly
 		}
+		if !emp.IsActive {
+			return ErrTimeEntryInactive
+		}
+
+		// Each entry is capped at 24h, but nothing capped the day: several
+		// entries for one date could sum past 24h, and once approved they
+		// inflate accrual — and so how much the worker can draw.
+		if err := lockEmployeeDay(tx, employeeID, day); err != nil {
+			return err
+		}
+		claimed, err := dayMinutes(tx, employeeID, day,
+			[]models.TimeEntryStatus{models.TimeEntryPending, models.TimeEntryApproved}, "")
+		if err != nil {
+			return err
+		}
+		if claimed+minutesWorked > maxMinutesPerEntry {
+			return ErrTimeEntryDayOverflow
+		}
 
 		record := models.TimeEntry{
 			OrganizationID: orgID,
@@ -104,6 +141,20 @@ func (s *TimeEntryService) ApproveTimeEntry(ctx context.Context, orgID, entryID,
 		var e models.TimeEntry
 		if err := tx.First(&e, "id = ?", entryID).Error; err != nil {
 			return err
+		}
+		// Re-checked at approval, which is what makes minutes count: entries
+		// that predate the submit-time check, or were resolved out of order,
+		// must still never approve a day past 24h.
+		if err := lockEmployeeDay(tx, e.EmployeeID, e.WorkDate); err != nil {
+			return err
+		}
+		approved, err := dayMinutes(tx, e.EmployeeID, e.WorkDate,
+			[]models.TimeEntryStatus{models.TimeEntryApproved}, e.ID)
+		if err != nil {
+			return err
+		}
+		if approved+e.MinutesWorked > maxMinutesPerEntry {
+			return ErrTimeEntryDayOverflow
 		}
 		if err := models.TransitionTimeEntry(tx, &e, models.TimeEntryPending, models.TimeEntryApproved, actor, ""); err != nil {
 			if errors.Is(err, models.ErrStaleStatus) {

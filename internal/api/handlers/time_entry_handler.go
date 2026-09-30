@@ -52,7 +52,9 @@ func (h *TimeEntryHandler) SubmitTimeEntry(c *gin.Context) {
 		case errors.Is(err, services.ErrTimeEntryNotHourly),
 			errors.Is(err, services.ErrTimeEntryFutureDate),
 			errors.Is(err, services.ErrTimeEntryInvalidRange),
-			errors.Is(err, services.ErrTimeEntryInvalidShift):
+			errors.Is(err, services.ErrTimeEntryInvalidShift),
+			errors.Is(err, services.ErrTimeEntryDayOverflow),
+			errors.Is(err, services.ErrTimeEntryInactive):
 			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 		case errors.Is(err, gorm.ErrRecordNotFound):
 			c.JSON(http.StatusNotFound, gin.H{"error": "employee record not found"})
@@ -138,6 +140,8 @@ func (h *TimeEntryHandler) handleResolveError(c *gin.Context, orgID, entryID str
 		c.JSON(http.StatusNotFound, gin.H{"error": "time entry not found"})
 	case errors.Is(err, services.ErrTimeEntryAlreadyResolved):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+	case errors.Is(err, services.ErrTimeEntryDayOverflow):
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 	default:
 		middleware.Logger.Error("time entry resolution failed",
 			"org_id", orgID, "entry_id", entryID, "error", err.Error())

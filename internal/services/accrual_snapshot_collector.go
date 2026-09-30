@@ -37,11 +37,10 @@ func NewAccrualSnapshotCollector() *AccrualSnapshotCollector {
 // skipped rather than aborting the whole run — a bad row in one tenant must
 // not cost every other tenant their day's snapshot.
 func (c *AccrualSnapshotCollector) Collect(ctx context.Context, asOf time.Time) error {
-	// Organization.IsActive has no backing column — no migration has ever
-	// created one, so nothing in this codebase can filter by it (a
-	// pre-existing model/schema drift, not something to paper over here).
-	// Every org is snapshotted; per-employee IsActive below is real and does
-	// the filtering that matters for this job.
+	// Every org is snapshotted, deactivated ones included: the snapshot is
+	// evidence of what accrual was on a date, and a deactivated org can't
+	// act on it anyway (TenantMiddleware refuses its tokens). Per-employee
+	// IsActive below does the filtering that matters for this job.
 	var orgs []models.Organization
 	if err := models.DB.Find(&orgs).Error; err != nil {
 		return err

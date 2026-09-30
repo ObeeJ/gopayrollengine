@@ -170,3 +170,69 @@ func TestListTimeEntries_FiltersByStatus(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, all, 2)
 }
+
+// Each entry was capped at 24h but the day wasn't: three 16h entries for one
+// date could all be approved, inflating accrual and so the draw limit.
+func TestSubmitTimeEntry_DayTotalCannotExceed24Hours(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedHourlyWorker(t, money.FromNaira(1_500))
+	svc := NewTimeEntryService()
+	day := time.Now().AddDate(0, 0, -2)
+
+	_, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID, day, 960, models.ShiftRegular, "")
+	require.NoError(t, err)
+	_, err = svc.SubmitTimeEntry(context.Background(), orgID, employeeID, day, 480, models.ShiftNight, "")
+	require.NoError(t, err, "exactly 24h in a day is allowed")
+	_, err = svc.SubmitTimeEntry(context.Background(), orgID, employeeID, day, 1, models.ShiftRegular, "")
+	assert.ErrorIs(t, err, ErrTimeEntryDayOverflow)
+
+	_, err = svc.SubmitTimeEntry(context.Background(), orgID, employeeID, day.AddDate(0, 0, -1), 960, models.ShiftRegular, "")
+	assert.NoError(t, err, "the cap is per day")
+}
+
+func TestSubmitTimeEntry_RejectedMinutesFreeTheDay(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedHourlyWorker(t, money.FromNaira(1_500))
+	svc := NewTimeEntryService()
+	day := time.Now().AddDate(0, 0, -2)
+
+	e, err := svc.SubmitTimeEntry(context.Background(), orgID, employeeID, day, 1440, models.ShiftRegular, "typo")
+	require.NoError(t, err)
+	_, err = svc.RejectTimeEntry(context.Background(), orgID, e.ID, "admin", "127.0.0.1", "typo")
+	require.NoError(t, err)
+	_, err = svc.SubmitTimeEntry(context.Background(), orgID, employeeID, day, 480, models.ShiftRegular, "corrected")
+	assert.NoError(t, err)
+}
+
+// Rows written before the submit-time check existed must still be stopped
+// at approval, which is the point where minutes start to count.
+func TestApproveTimeEntry_RefusesToApproveADayPast24Hours(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedHourlyWorker(t, money.FromNaira(1_500))
+	svc := NewTimeEntryService()
+	day := time.Now().AddDate(0, 0, -3).Truncate(24 * time.Hour)
+
+	var ids []string
+	for i := 0; i < 2; i++ {
+		e := models.TimeEntry{OrganizationID: orgID, EmployeeID: employeeID, WorkDate: day,
+			MinutesWorked: 960, ShiftType: models.ShiftRegular}
+		require.NoError(t, models.DB.Create(&e).Error) // bypasses SubmitTimeEntry, like legacy rows
+		ids = append(ids, e.ID)
+	}
+
+	_, err := svc.ApproveTimeEntry(context.Background(), orgID, ids[0], "admin", "127.0.0.1")
+	require.NoError(t, err)
+	_, err = svc.ApproveTimeEntry(context.Background(), orgID, ids[1], "admin", "127.0.0.1")
+	assert.ErrorIs(t, err, ErrTimeEntryDayOverflow)
+}
+
+func TestSubmitTimeEntry_TerminatedWorkerIsRefused(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedHourlyWorker(t, money.FromNaira(1_500))
+	_, err := NewEmployeeTerminationService().Terminate(context.Background(), orgID, employeeID, "contract ended", "127.0.0.1")
+	require.NoError(t, err)
+
+	_, err = NewTimeEntryService().SubmitTimeEntry(context.Background(), orgID, employeeID,
+		time.Now().AddDate(0, 0, -1), 60, models.ShiftRegular, "")
+	assert.ErrorIs(t, err, ErrTimeEntryInactive)
+}

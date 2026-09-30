@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go-payroll-engine/internal/observability"
 	"go-payroll-engine/pkg/money"
@@ -118,7 +119,18 @@ type BulkTransferResponse struct {
 	} `json:"responseBody"`
 }
 
+// ErrOutcomeUnknown means a request reached (or may have reached) Monnify but
+// no definitive answer came back — a network failure mid-request, a timeout,
+// a 5xx, or a body that couldn't be read. Monnify may have accepted the batch
+// anyway, so the caller must not treat this as "nothing happened" and resend:
+// that is how a payroll gets paid twice. Wait for the webhooks instead.
+var ErrOutcomeUnknown = errors.New("monnify: request outcome unknown")
+
 // InitiateBulkTransfer — submits a batch of disbursements; outcomes arrive later via webhook.
+//
+// Errors wrapping ErrOutcomeUnknown are ambiguous (see its doc). Any other
+// error, or a response with RequestSuccessful=false, means Monnify did not
+// accept the batch.
 func (c *Client) InitiateBulkTransfer(payload BulkTransferRequest) (*BulkTransferResponse, error) {
 	start := time.Now()
 	defer func() {
@@ -148,13 +160,17 @@ func (c *Client) InitiateBulkTransfer(payload BulkTransferRequest) (*BulkTransfe
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: bulk transfer: %w", ErrOutcomeUnknown, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode >= 500 {
+		return nil, fmt.Errorf("%w: bulk transfer: HTTP %d", ErrOutcomeUnknown, resp.StatusCode)
+	}
+
 	var bulkResp BulkTransferResponse
 	if err := json.NewDecoder(resp.Body).Decode(&bulkResp); err != nil {
-		return nil, fmt.Errorf("monnify bulk transfer response decode failed: %w", err)
+		return nil, fmt.Errorf("%w: bulk transfer response decode failed: %w", ErrOutcomeUnknown, err)
 	}
 	success := "true"
 	if !bulkResp.RequestSuccessful {

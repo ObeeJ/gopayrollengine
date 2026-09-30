@@ -14,10 +14,3 @@ func TestIdempotency_Placeholder(t *testing.T) {
 	}
 	// TODO: cache miss processes handler; cache hit replays; 4xx not cached.
 }
-
-func TestBloomFilter_Placeholder(t *testing.T) {
-	if os.Getenv("REDIS_URL") == "" {
-		t.Skip("REDIS_URL not set — skipping bloom-filter integration test")
-	}
-	// TODO: Add(item) then MightContain(item)==true; un-added item==false.
-}

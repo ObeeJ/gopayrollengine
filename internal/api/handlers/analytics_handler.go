@@ -14,7 +14,7 @@ type AnalyticsHandler struct {
 
 // GetPredictiveAnalytics — cash flow forecast scoped to the caller's org.
 func (h *AnalyticsHandler) GetPredictiveAnalytics(c *gin.Context) {
-	result, err := h.Service.GetPredictiveCashFlow(middleware.OrgID(c))
+	result, err := h.Service.GetPredictiveCashFlow(c.Request.Context(), middleware.OrgID(c))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

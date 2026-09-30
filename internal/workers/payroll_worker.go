@@ -179,8 +179,24 @@ func (h *PayrollHandler) ProcessPayrollTask(ctx context.Context, t *asynq.Task) 
 	}
 
 	resp, err := h.MonnifyClient.InitiateBulkTransfer(bulkReq)
+	if errors.Is(err, monnify.ErrOutcomeUnknown) {
+		// Monnify may have accepted this batch — a timeout or a dropped
+		// connection says nothing about whether it did. Marking it failed
+		// and letting Asynq retry would resend every still-pending item,
+		// and whether employees were then paid twice would rest entirely on
+		// Monnify rejecting the duplicate references. Leave it processing
+		// with pending_count as set above: if the batch was accepted, its
+		// webhooks resolve it exactly as normal; if it wasn't, it stays
+		// visibly stuck for an operator to check against Monnify — stuck is
+		// recoverable, a double salary run is not.
+		observability.WorkerTasksTotal.WithLabelValues(TypeProcessPayroll, "outcome_unknown").Inc()
+		log.Printf("CRITICAL: payroll %s bulk transfer outcome unknown — left processing, NOT retrying: %v", payrollID, err)
+		return fmt.Errorf("payroll %s: %w: %w", payrollID, err, asynq.SkipRetry)
+	}
 	if err != nil {
-		// Phase-1 tx is committed; open a fresh RLS scope to mark failed.
+		// Definitely not accepted (e.g. auth failed before sending), so a
+		// bounded retry is safe. Phase-1 tx is committed; open a fresh RLS
+		// scope to mark failed.
 		if scopeErr := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
 			return models.TransitionStatus(tx, &payroll, models.PayrollProcessing, models.PayrollFailed)
 		}); scopeErr != nil {

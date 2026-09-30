@@ -57,7 +57,7 @@ func main() {
 		// config/scheduler-crontab). Nothing invoked this on its own before
 		// that existed; a human had to run it by hand.
 		collector := services.NewEvidenceCollector()
-		if err := collector.Collect(time.Now().AddDate(0, 0, -1)); err != nil {
+		if err := collector.Collect(context.Background(), time.Now().AddDate(0, 0, -1)); err != nil {
 			log.Fatal("Evidence collection failed:", err)
 		}
 	case "snapshot-accruals":

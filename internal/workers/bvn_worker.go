@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
+	"gorm.io/gorm"
 )
 
 // BVNHandler — processes async BVN verification tasks with Asynq retry semantics.
@@ -67,7 +68,7 @@ func (h *BVNHandler) ProcessBVNTask(ctx context.Context, t *asynq.Task) error {
 		v.Provider = "mock"
 		v.Status = "verified"
 		v.ResponseHash = fmt.Sprintf("%x", sha256.Sum256([]byte("mock-bvn-"+bvn)))
-		return models.DB.Create(v).Error
+		return saveBVNVerification(ctx, v)
 	}
 
 	apiKey := os.Getenv("DOJAH_API_KEY")
@@ -105,11 +106,24 @@ func (h *BVNHandler) ProcessBVNTask(ctx context.Context, t *asynq.Task) error {
 		v.Status = "failed"
 	}
 
-	if err := models.DB.Create(v).Error; err != nil {
+	if err := saveBVNVerification(ctx, v); err != nil {
 		return err
 	}
 	if v.Status == "failed" {
-		return fmt.Errorf("BVN verification failed: %s", dojahResp.Error)
+		// A definitive answer from Dojah, not a transient fault: retrying
+		// would only re-bill the same lookup and write another failed row.
+		return fmt.Errorf("BVN verification failed: %s: %w", dojahResp.Error, asynq.SkipRetry)
 	}
 	return nil
+}
+
+// saveBVNVerification writes the outcome inside the employee's org scope.
+// bvn_verifications has forced row-level security; an unscoped insert is
+// rejected by its WITH CHECK policy under the production database role, so
+// every result was silently lost there while tests (run as a superuser,
+// which bypasses RLS) passed. See TestProcessBVNTask_PersistsUnderProductionRole.
+func saveBVNVerification(ctx context.Context, v *models.BVNVerification) error {
+	return models.WithOrgScope(ctx, v.OrganizationID, func(tx *gorm.DB) error {
+		return tx.Create(v).Error
+	})
 }

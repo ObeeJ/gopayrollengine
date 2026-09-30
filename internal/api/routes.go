@@ -27,9 +27,6 @@ func SetupRouter() *gin.Engine {
 	r.Use(middleware.RateLimit())
 	r.Use(gin.Recovery())
 
-	// Bloom filter: 100k bits, 7 hashes, ~1% FP rate, ~12 KB Redis.
-	middleware.WebhookBloom = middleware.NewBloomFilter(workers.RDB, "bloom:webhooks", 100_000, 7)
-
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	healthHandler := &handlers.HealthHandler{DB: models.DB, RDB: workers.RDB}
@@ -90,10 +87,18 @@ func SetupRouter() *gin.Engine {
 		// Monnify webhook — HMAC-verified, no JWT needed.
 		v1.POST("/webhooks/monnify", webhookHandler.HandleMonnifyWebhook)
 
-		// D2C debit-collection webhook — no real aggregator wired yet, so no
-		// signature verification either; see D2CDebitWebhookPayload's doc
-		// comment. Add one before wiring this to a live provider.
-		v1.POST("/webhooks/d2c-debit-collection", webhookHandler.HandleD2CDebitWebhook)
+		// D2C debit-collection webhook — unauthenticated (no real aggregator
+		// exists yet to define a signature scheme; see
+		// D2CDebitWebhookPayload's doc comment), and it writes ledger
+		// entries: a "successful" callback records cash received against a
+		// worker's advance. So it only exists where a debit provider does —
+		// under MOCK_MODE today. Registering it unconditionally let anyone
+		// on the internet post a fabricated collection outcome to a
+		// production deployment. Add signature verification before
+		// removing this gate for a live provider.
+		if d2cProvider != nil {
+			v1.POST("/webhooks/d2c-debit-collection", webhookHandler.HandleD2CDebitWebhook)
+		}
 
 		// D2C signup — public, same posture as /auth/login and
 		// /worker/auth/login: there is no identity yet to gate this behind.

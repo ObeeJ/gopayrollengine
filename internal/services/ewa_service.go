@@ -593,6 +593,19 @@ func (s *EWAService) RequestAdvance(
 	var eligibility *Eligibility
 
 	err := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
+		// Serialize every advance decision within this org for the rest of
+		// the transaction. Eligibility is read-then-insert: without this, N
+		// concurrent requests all read the same "nothing outstanding yet"
+		// state and each approves the full available balance — reproduced
+		// by TestRequestAdvance_ConcurrentRequestsCannotOverdraw at 2x the
+		// worker's earnings. Org-wide rather than per-employee because the
+		// funding-pool cap is shared by every worker in the org, and the
+		// same race would otherwise let different workers jointly exhaust
+		// it. Transaction-scoped, so it releases at commit or rollback.
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", "ewa_advance:"+orgID).Error; err != nil {
+			return err
+		}
+
 		// Replay of a previous request returns the original decision.
 		if idempotencyKey != "" {
 			var existing models.EWAAdvance

@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"context"
 	"crypto/hmac"
 	"crypto/sha512"
 	"encoding/hex"
@@ -101,14 +100,16 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 		return
 	}
 
-	// Bloom filter — probable duplicates skip the DB; ~1% false positives fall through.
-	if middleware.WebhookBloom != nil {
-		ctx := context.Background()
-		if seen, err := middleware.WebhookBloom.MightContain(ctx, ref); err == nil && seen {
-			c.Status(http.StatusOK)
-			return
-		}
-	}
+	// No probabilistic "already seen" short-circuit here, deliberately. A
+	// Bloom filter used to sit in front of this and returned 200 on "maybe
+	// seen" without touching the database — but a Bloom filter only ever
+	// knows "definitely new" vs "maybe seen", and a fixed-size one that
+	// never expires saturates toward 100% false positives as references
+	// accumulate. Every false positive was a first-time callback Monnify
+	// was told had succeeded and then never retried: a payout recorded as
+	// neither paid nor failed. The status checks + CAS transitions below
+	// are what actually make redelivery idempotent, and they are exact.
+	// See TestMonnifyWebhook_FirstDeliveryAlwaysProcessed.
 
 	if strings.HasPrefix(ref, "EWA-") {
 		h.handleEWAAdvanceWebhook(c, payload, ref)
@@ -225,10 +226,12 @@ func (h *WebhookHandler) handlePayrollItemWebhook(c *gin.Context, payload Monnif
 		// No row updated means the counter was already zero — the batch has been
 		// reconciled by another webhook. The item transition above still stands.
 		if res.RowsAffected > 0 && post.PendingCount == 0 {
-			reconcilePayrollStatus(tx, orgID, models.Payroll{
+			if err := reconcilePayrollStatus(tx, orgID, models.Payroll{
 				ID:     item.PayrollID,
 				Status: post.Status,
-			})
+			}); err != nil {
+				return err
+			}
 		}
 
 		// Audit inside the same tx — failure rolls everything back and Monnify will retry.
@@ -241,7 +244,6 @@ func (h *WebhookHandler) handlePayrollItemWebhook(c *gin.Context, payload Monnif
 		return
 	}
 
-	markSeen(ref)
 	c.Status(http.StatusOK)
 }
 
@@ -340,7 +342,6 @@ func (h *WebhookHandler) handleEWAAdvanceWebhook(c *gin.Context, payload Monnify
 		return
 	}
 
-	markSeen(ref)
 	c.Status(http.StatusOK)
 }
 
@@ -378,14 +379,6 @@ func (h *WebhookHandler) handleFundingWebhook(c *gin.Context, body []byte) {
 		return
 	}
 
-	if middleware.WebhookBloom != nil {
-		ctx := context.Background()
-		if seen, err := middleware.WebhookBloom.MightContain(ctx, ref); err == nil && seen {
-			c.Status(http.StatusOK)
-			return
-		}
-	}
-
 	// SECURITY DEFINER lookup (migration 000019) — same justification as
 	// lookup_ewa_advance_for_webhook: HMAC already authenticated the request,
 	// and the write below runs inside WithOrgScope using the org_id this
@@ -419,27 +412,22 @@ func (h *WebhookHandler) handleFundingWebhook(c *gin.Context, body []byte) {
 		return
 	}
 
-	markSeen(ref)
 	c.Status(http.StatusOK)
 }
 
-// markSeen records ref in the bloom filter so future duplicate deliveries of
-// the same event skip straight past the DB lookup.
-func markSeen(ref string) {
-	if middleware.WebhookBloom == nil {
-		return
-	}
-	if err := middleware.WebhookBloom.Add(context.Background(), ref); err != nil {
-		middleware.Logger.Warn("bloom filter add failed", "ref", ref, "error", err.Error())
-	}
-}
-
 // reconcilePayrollStatus — called once per batch when pending_count hits zero; CAS UPDATE makes races a no-op.
-func reconcilePayrollStatus(tx *gorm.DB, orgID string, payroll models.Payroll) {
+//
+// Every failure is returned so the caller's transaction rolls back and
+// Monnify redelivers. A failed item count used to be ignored, which read as
+// zero failures and closed the batch as completed even when some employees'
+// transfers had failed.
+func reconcilePayrollStatus(tx *gorm.DB, orgID string, payroll models.Payroll) error {
 	var failedCount int64
-	tx.Model(&models.PayrollItem{}).
+	if err := tx.Model(&models.PayrollItem{}).
 		Where("payroll_id = ? AND status = ?", payroll.ID, models.PayrollFailed).
-		Count(&failedCount)
+		Count(&failedCount).Error; err != nil {
+		return fmt.Errorf("counting failed items for payroll %s: %w", payroll.ID, err)
+	}
 
 	newStatus := models.PayrollCompleted
 	if failedCount > 0 {
@@ -449,20 +437,15 @@ func reconcilePayrollStatus(tx *gorm.DB, orgID string, payroll models.Payroll) {
 	// FSM CAS: processing → completed/failed; stale status means someone beat us, also fine.
 	if err := models.TransitionStatus(tx, &payroll, payroll.Status, newStatus); err != nil {
 		if errors.Is(err, models.ErrStaleStatus) {
-			return
+			return nil
 		}
-		middleware.Logger.Error("payroll reconciliation FSM error",
-			"payroll_id", payroll.ID,
-			"error", err.Error(),
-		)
-		return
+		return fmt.Errorf("payroll %s reconciliation: %w", payroll.ID, err)
 	}
 
 	// Audit the batch-level resolution inside the same tx.
 	if err := models.AppendAuditTx(tx, orgID, "Payroll", payroll.ID, "reconciled",
 		string(payroll.Status), string(newStatus), "internal", ""); err != nil {
-		middleware.Logger.Error("CRITICAL: reconciliation audit write failed",
-			"payroll_id", payroll.ID, "next", newStatus, "error", err.Error())
+		return fmt.Errorf("payroll %s reconciliation audit: %w", payroll.ID, err)
 	}
 
 	middleware.Logger.Info("payroll reconciled",
@@ -470,4 +453,5 @@ func reconcilePayrollStatus(tx *gorm.DB, orgID string, payroll models.Payroll) {
 		"status", newStatus,
 		"failed_items", fmt.Sprintf("%d", failedCount),
 	)
+	return nil
 }

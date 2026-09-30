@@ -1,11 +1,15 @@
 package services
 
 import (
+	"context"
 	"fmt"
 	"go-payroll-engine/internal/integrations/monnify"
+	"go-payroll-engine/internal/models"
 	"go-payroll-engine/internal/repository"
 	"go-payroll-engine/pkg/money"
 	"os"
+
+	"gorm.io/gorm"
 )
 
 type AnalyticsService struct {
@@ -25,25 +29,41 @@ func NewAnalyticsService(pr repository.PayrollRepository, er repository.Employee
 
 type PredictionResult struct {
 	PredictedAmount money.Kobo `json:"predicted_amount"`
-	CurrentBalance  money.Kobo `json:"current_balance"`
-	RiskLevel       string     `json:"risk_level"`
-	Message         string     `json:"message"`
+	// CurrentBalance is the platform's shared Monnify source wallet — every
+	// tenant's pooled payroll float, not this org's own money — so it drives
+	// the risk level but is never serialized to a tenant.
+	CurrentBalance money.Kobo `json:"-"`
+	RiskLevel      string     `json:"risk_level"`
+	Message        string     `json:"message"`
 }
 
 // GetPredictiveCashFlow — weighted sliding-window forecast vs live wallet balance; integer Kobo throughout.
-func (s *AnalyticsService) GetPredictiveCashFlow(orgID string) (*PredictionResult, error) {
-	payrolls, err := s.payrollRepo.FindCompleted(orgID, 3)
-	if err != nil {
+//
+// Both reads run inside WithOrgScope: payrolls and employees have forced
+// row-level security, and read unscoped they return zero rows under the
+// production database role — this always reported an empty history and a
+// zero-employee cold start there, while tests run as a superuser (which
+// bypasses RLS) saw real data. See
+// TestPredictiveCashFlow_ReadsHistoryUnderProductionRole.
+func (s *AnalyticsService) GetPredictiveCashFlow(ctx context.Context, orgID string) (*PredictionResult, error) {
+	var payrolls []models.Payroll
+	var employees []models.Employee
+	if err := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
+		var err error
+		payrolls, err = s.payrollRepo.WithTx(tx).FindCompleted(orgID, 3)
+		if err != nil || len(payrolls) > 0 {
+			return err
+		}
+		employees, err = s.employeeRepo.WithTx(tx).FindAllActive(orgID)
+		return err
+	}); err != nil {
 		return nil, err
 	}
 
 	var predictedAmount money.Kobo
+	var err error
 	if len(payrolls) == 0 {
 		// Cold-start: no history — sum active salaries as a baseline.
-		employees, err := s.employeeRepo.FindAllActive(orgID)
-		if err != nil {
-			return nil, err
-		}
 		salaries := make([]money.Kobo, len(employees))
 		for i, e := range employees {
 			salaries[i] = e.Salary
@@ -94,7 +114,7 @@ func (s *AnalyticsService) GetPredictiveCashFlow(orgID string) (*PredictionResul
 	switch {
 	case currentBalance < predictedAmount:
 		riskLevel = "High"
-		message = fmt.Sprintf("Warning: Your balance (%s) is less than the predicted payroll amount (%s). Please fund your wallet.", currentBalance, predictedAmount)
+		message = fmt.Sprintf("Warning: available payroll funds are below the predicted payroll amount (%s). Please fund your wallet.", predictedAmount)
 	case currentBalance < mediumThreshold:
 		riskLevel = "Medium"
 		message = "Your balance is close to the predicted payroll amount. Consider adding more funds."

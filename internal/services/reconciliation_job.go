@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 
@@ -135,7 +136,11 @@ func (j *ReconciliationJob) sumCashSettlement(ctx context.Context) (money.Kobo, 
 			return nil
 		})
 		if err != nil {
-			log.Printf("reconciliation: org %s cash_settlement read failed: %v", org.ID, err)
+			// Fail the run rather than skip the org: a total missing one
+			// org's balance is simply wrong, and comparing it against the
+			// wallet would report drift that isn't there (or mask drift
+			// that is) with no sign anything had gone amiss.
+			return 0, fmt.Errorf("reconciliation: org %s cash_settlement read failed: %w", org.ID, err)
 		}
 	}
 	return total, nil

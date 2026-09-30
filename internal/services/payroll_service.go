@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go-payroll-engine/internal/integrations/provider"
 	"go-payroll-engine/internal/models"
@@ -33,8 +34,36 @@ func NewPayrollService(pr repository.PayrollRepository, er repository.EmployeeRe
 	}
 }
 
+var (
+	// ErrInvalidPeriod — the period isn't exactly PeriodLayout (YYYY-MM).
+	ErrInvalidPeriod = errors.New("payroll: period must be YYYY-MM")
+	// ErrNoActiveEmployees — nothing to pay.
+	ErrNoActiveEmployees = errors.New("payroll: no active employees found for this organization")
+	// ErrUnsupportedCurrency — no provider can settle the org's currency.
+	ErrUnsupportedCurrency = errors.New("payroll: no provider can settle this organization's currency")
+)
+
+// ValidatePeriod accepts only the canonical PeriodLayout form. Round-tripping
+// matters, not just parsing: the (organization_id, period) unique index is
+// the only thing stopping the same month being paid twice, and it compares
+// strings — "2026-09", "2026-9" and "Sep 2026" would each be a fresh period
+// to it, paying every salaried employee once per spelling. The same mismatch
+// would also leave advances drawn in "2026-09" never recovered by a run
+// named anything else, since settlement matches on the period string too.
+func ValidatePeriod(period string) error {
+	t, err := time.Parse(PeriodLayout, period)
+	if err != nil || t.Format(PeriodLayout) != period {
+		return fmt.Errorf("%w: got %q", ErrInvalidPeriod, period)
+	}
+	return nil
+}
+
 // CreatePayroll builds and persists the batch under the org's RLS scope, then queues it for the worker.
 func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string) (*models.Payroll, error) {
+	if err := ValidatePeriod(period); err != nil {
+		return nil, err
+	}
+
 	payroll := models.Payroll{
 		OrganizationID: orgID,
 		Period:         period,
@@ -42,6 +71,14 @@ func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string
 	}
 
 	err := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
+		// Same org-wide lock RequestAdvance takes: settlement below reads
+		// each worker's outstanding advances and recovers them from this
+		// run's pay, so an advance approved between that read and this
+		// transaction's commit would be missed by this run's withholding.
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", "ewa_advance:"+orgID).Error; err != nil {
+			return err
+		}
+
 		// Fail now, synchronously, rather than queuing a run the async worker
 		// can only ever fail deep inside a Monnify bulk-transfer call: the
 		// worker's disbursement path is Monnify-specific and Monnify only
@@ -54,7 +91,7 @@ func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string
 			return err
 		}
 		if _, err := s.providers.Select(currency); err != nil {
-			return fmt.Errorf("payroll: %w", err)
+			return fmt.Errorf("%w: %w", ErrUnsupportedCurrency, err)
 		}
 
 		employees, err := s.employeeRepo.WithTx(tx).FindAllActive(orgID)
@@ -62,7 +99,7 @@ func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string
 			return err
 		}
 		if len(employees) == 0 {
-			return fmt.Errorf("no active employees found for this organization")
+			return ErrNoActiveEmployees
 		}
 
 		txPayrollRepo := s.payrollRepo.WithTx(tx)
@@ -154,10 +191,23 @@ func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string
 				}
 			}
 
+			updates := map[string]interface{}{}
 			if withheld.IsPositive() || diverted.IsPositive() {
+				updates["amount"] = net
+			}
+			// Nothing to pay (net fully withheld, or an hourly worker with no
+			// approved hours this period) — settle the item now rather than
+			// sending a zero-amount line to the bank, which rails reject and
+			// which can fail the entire batch for everyone else in it. The
+			// worker only submits PayrollPending items, so this one is
+			// neither sent nor counted toward pending_count.
+			if !net.IsPositive() {
+				updates["status"] = models.PayrollCompleted
+			}
+			if len(updates) > 0 {
 				if err := tx.Model(&models.PayrollItem{}).
 					Where("id = ?", item.ID).
-					Update("amount", net).Error; err != nil {
+					Updates(updates).Error; err != nil {
 					return err
 				}
 			}
@@ -181,7 +231,11 @@ func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string
 
 	// Enqueue after commit; failed enqueue leaves status=pending for retry, payload carries orgID for RLS.
 	payload, _ := json.Marshal(map[string]string{"payroll_id": payroll.ID, "org_id": orgID})
-	task := asynq.NewTask(workers.TypeProcessPayroll, payload)
+	// Bounded, not asynq's default of 25: the worker only returns a
+	// retryable error when the bank definitively rejected the batch (so
+	// nothing was sent and retrying is safe); an ambiguous outcome is
+	// returned as asynq.SkipRetry — see ProcessPayrollTask.
+	task := asynq.NewTask(workers.TypeProcessPayroll, payload, asynq.MaxRetry(5))
 	if _, err := workers.Client.Enqueue(task); err != nil {
 		return nil, fmt.Errorf("payroll created but queue rejected it: %w", err)
 	}

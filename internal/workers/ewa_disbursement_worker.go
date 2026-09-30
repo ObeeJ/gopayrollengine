@@ -91,7 +91,7 @@ func (h *EWADisbursementHandler) ProcessEWADisbursementTask(ctx context.Context,
 		// not a transient one. Retrying will not fix it, so fail loudly enough
 		// to page rather than let Asynq retry forever.
 		observability.WorkerTasksTotal.WithLabelValues(TypeDisburseEWAAdvance, "error").Inc()
-		return fmt.Errorf("ewa advance %s: %w", advanceID, err)
+		return fmt.Errorf("ewa advance %s: %w: %w", advanceID, err, asynq.SkipRetry)
 	}
 
 	result, err := pay.InitiateTransfer(ctx, provider.TransferRequest{
@@ -148,8 +148,8 @@ func (h *EWADisbursementHandler) ProcessEWADisbursementTask(ctx context.Context,
 		// — but nothing here recorded which provider or reference to reconcile
 		// against if that webhook is ever late or lost.
 		observability.WorkerTasksTotal.WithLabelValues(TypeDisburseEWAAdvance, "error").Inc()
-		return fmt.Errorf("ewa advance %s: accepted by %s but failed to record submission: %w",
-			advanceID, pay.Name(), err)
+		return fmt.Errorf("ewa advance %s: accepted by %s but failed to record submission: %w: %w",
+			advanceID, pay.Name(), err, asynq.SkipRetry)
 	}
 
 	observability.EWADisbursementDuration.WithLabelValues(pay.Name()).Observe(time.Since(start).Seconds())

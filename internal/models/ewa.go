@@ -379,6 +379,18 @@ func (b *EWABill) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
+// HardshipGrantStatus — pending → submitted → disbursed, or → failed from
+// either of the first two. Disbursed means a provider confirmed the money
+// landed, not that it was sent — same rule as AdvanceDisbursed.
+type HardshipGrantStatus string
+
+const (
+	GrantPending   HardshipGrantStatus = "pending"
+	GrantSubmitted HardshipGrantStatus = "submitted"
+	GrantDisbursed HardshipGrantStatus = "disbursed"
+	GrantFailed    HardshipGrantStatus = "failed"
+)
+
 // EWAHardshipGrant — a genuine alternative to a fourth advance: discretionary
 // employer money issued to a worker outright, never recovered from a future
 // payroll run. Recorded here as a decision an admin actually made, the same
@@ -392,9 +404,14 @@ type EWAHardshipGrant struct {
 	Reason       string     `gorm:"not null" json:"reason"`
 	ApprovedByIP string     `gorm:"column:approved_by_ip;not null" json:"-"`
 
-	DisbursedAt time.Time `json:"disbursed_at"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	Status            HardshipGrantStatus `gorm:"not null" json:"status"`
+	ProviderName      *string             `json:"provider_name,omitempty"`
+	ProviderReference *string             `json:"-"`
+	FailureReason     *string             `json:"failure_reason,omitempty"`
+	SubmittedAt       *time.Time          `json:"submitted_at,omitempty"`
+	DisbursedAt       *time.Time          `json:"disbursed_at,omitempty"`
+	CreatedAt         time.Time           `json:"created_at"`
+	UpdatedAt         time.Time           `json:"updated_at"`
 }
 
 func (EWAHardshipGrant) TableName() string { return "ewa_hardship_grants" }
@@ -404,8 +421,8 @@ func (g *EWAHardshipGrant) BeforeCreate(tx *gorm.DB) error {
 	if g.ID == "" {
 		g.ID = "GRANT-" + uuid.New().String()[:8]
 	}
-	if g.DisbursedAt.IsZero() {
-		g.DisbursedAt = time.Now()
+	if g.Status == "" {
+		g.Status = GrantPending
 	}
 	return nil
 }

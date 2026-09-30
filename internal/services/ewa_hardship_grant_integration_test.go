@@ -4,12 +4,17 @@ package services
 
 import (
 	"context"
+	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"go-payroll-engine/internal/models"
+	"go-payroll-engine/internal/workers"
 	"go-payroll-engine/pkg/money"
 
+	"github.com/hibiken/asynq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -142,4 +147,76 @@ func TestGetEligibility_SuggestsHardshipGrantAtDrawLimitWhileStrained(t *testing
 	require.Contains(t, []models.DependencyTier{models.TierStrained, models.TierDependent}, el.Dependency.Tier,
 		"test setup must actually reach a referral-eligible tier")
 	assert.True(t, el.HardshipGrantSuggested)
+}
+
+// The grant must be scheduled for payout in the same transaction that
+// records it — it used to be booked as paid with no payout ever scheduled.
+func TestIssueHardshipGrant_StartsPendingAndSchedulesPayout(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+
+	grant, err := NewEWAService().IssueHardshipGrant(
+		context.Background(), orgID, employeeID, money.FromNaira(5_000), "school fees", "127.0.0.1")
+	require.NoError(t, err)
+	assert.Equal(t, models.GrantPending, grant.Status)
+	assert.Nil(t, grant.DisbursedAt, "not disbursed until a provider confirms it")
+
+	info, err := asynqInspector(t).GetTaskInfo("default", "grant-disburse:"+grant.ID)
+	require.NoError(t, err, "a payout task must be enqueued for the grant")
+	assert.Equal(t, workers.TypeDisburseGrant, info.Type)
+}
+
+func TestIssueHardshipGrant_RefusesOtherOrgsAndInactiveEmployees(t *testing.T) {
+	skipIfNoDB(t)
+	orgA, _ := seedWorker(t, money.FromNaira(300_000))
+	orgB, employeeB := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+
+	_, err := svc.IssueHardshipGrant(context.Background(), orgA, employeeB, money.FromNaira(1_000), "x", "127.0.0.1")
+	assert.ErrorIs(t, err, ErrHardshipGrantEmployeeIneligible, "the FK alone accepted another org's employee")
+
+	_, err = NewEmployeeTerminationService().Terminate(context.Background(), orgB, employeeB, "left", "127.0.0.1")
+	require.NoError(t, err)
+	_, err = svc.IssueHardshipGrant(context.Background(), orgB, employeeB, money.FromNaira(1_000), "x", "127.0.0.1")
+	assert.ErrorIs(t, err, ErrHardshipGrantEmployeeIneligible)
+}
+
+// Grants and advances share the funding pool; concurrent grants must not
+// each see the same headroom and jointly overdraw it.
+func TestIssueHardshipGrant_ConcurrentGrantsCannotOverdrawPool(t *testing.T) {
+	skipIfNoDB(t)
+	orgID, employeeID := seedWorker(t, money.FromNaira(300_000))
+	svc := NewEWAService()
+	_, err := svc.UpdatePolicy(context.Background(), orgID, PolicyUpdate{RequireFundingCoverage: boolPtr(true)}, "127.0.0.1")
+	require.NoError(t, err)
+	require.NoError(t, models.WithOrgScope(context.Background(), orgID, func(tx *gorm.DB) error {
+		return models.RecordEmployerFunding(tx, orgID, money.Money{Minor: 20_000 * 100, Currency: money.NGN}, "dep-"+orgID)
+	}))
+
+	const n = 8
+	var wg sync.WaitGroup
+	var granted atomic.Int32
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := svc.IssueHardshipGrant(context.Background(), orgID, employeeID,
+				money.FromNaira(10_000), "concurrent", "127.0.0.1"); err == nil {
+				granted.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	assert.Equal(t, int32(2), granted.Load(), "a ₦20,000 pool funds exactly two ₦10,000 grants")
+}
+
+func asynqInspector(t *testing.T) *asynq.Inspector {
+	t.Helper()
+	addr := os.Getenv("REDIS_URL")
+	if addr == "" {
+		addr = "localhost:6379"
+	}
+	insp := asynq.NewInspector(asynq.RedisClientOpt{Addr: addr, Password: os.Getenv("REDIS_PASSWORD")})
+	t.Cleanup(func() { _ = insp.Close() })
+	return insp
 }

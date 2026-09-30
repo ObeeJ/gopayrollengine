@@ -403,7 +403,12 @@ more of the same. That is where the actual differentiation is:
   admin-only) — genuinely discretionary employer money, not another draw
   against wages; surfaced as `hardship_grant_suggested` on the eligibility
   response at the moment a fourth advance would help least (draw limit
-  reached while already Strained or Dependent).
+  reached while already Strained or Dependent). Until migration 000033 a
+  grant was only booked, never paid: nothing submitted a transfer. Grants
+  now start `pending`, are paid by a worker task
+  (`workers.HardshipGrantDisbursementHandler`) scheduled in the same
+  transaction, and are confirmed (`disbursed`) or reversed (`failed`) by the
+  Monnify webhook, the same pipeline EWA advances use.
 
 ### Phase 5 — Scale ✅ engineering-complete except two items blocked on missing vendor access (see D2C's last bullet below)
 

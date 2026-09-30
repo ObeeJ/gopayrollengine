@@ -5,4 +5,5 @@ const (
 	TypeProcessPayroll     = "payroll:process"
 	TypeVerifyBVN          = "bvn:verify"
 	TypeDisburseEWAAdvance = "ewa:disburse"
+	TypeDisburseGrant      = "ewa:grant:disburse"
 )

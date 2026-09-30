@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go-payroll-engine/internal/appenv"
 	"log"
 	"os"
 	"time"
@@ -27,7 +28,7 @@ func InitDB() {
 
 	// Silence GORM's query logger in production; it leaks query structure into logs.
 	logLevel := logger.Info
-	if os.Getenv("APP_ENV") == "production" {
+	if !appenv.AllowsInsecureDefaults() {
 		logLevel = logger.Silent
 	}
 
@@ -72,7 +73,7 @@ func runMigrations(dsn string) {
 	defer func() { _, _ = m.Close() }()
 
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		if os.Getenv("APP_ENV") == "production" {
+		if !appenv.AllowsInsecureDefaults() {
 			log.Fatal("Migration failed in production — refusing to start with a dirty schema:", err)
 		}
 		// In dev, log and continue — lets you work with a partial schema during development.

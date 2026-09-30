@@ -192,3 +192,60 @@ func TestRequireEmployer(t *testing.T) {
 		assert.Equal(t, tc.want, w.Code, "role=%q", tc.role)
 	}
 }
+
+// A token with no exp claim never expires; the parser must refuse it rather
+// than treat "no expiry" as "valid forever".
+func TestJWTAuth_TokenWithoutExpiryRejected(t *testing.T) {
+	claims := Claims{OrgID: "ORG-1", Role: "admin"}
+	tok, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(jwtSecret)
+	require.NoError(t, err)
+
+	w := doGet(newRouter(JWTAuth(), okHandler), tok)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestJWTAuth_OtherHMACAlgorithmRejected(t *testing.T) {
+	claims := Claims{OrgID: "ORG-1", Role: "admin", RegisteredClaims: jwt.RegisteredClaims{
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute)),
+	}}
+	tok, err := jwt.NewWithClaims(jwt.SigningMethodHS512, claims).SignedString(jwtSecret)
+	require.NoError(t, err)
+
+	w := doGet(newRouter(JWTAuth(), okHandler), tok)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestIssueRefreshedToken_PreservesAuthTime(t *testing.T) {
+	login := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	tok, err := IssueRefreshedToken("ORG-1", "admin", login, time.Minute)
+	require.NoError(t, err)
+
+	var got time.Time
+	r := newRouter(JWTAuth(), func(c *gin.Context) { got = AuthTime(c); c.Status(http.StatusOK) })
+	require.Equal(t, http.StatusOK, doGet(r, tok).Code)
+	assert.True(t, got.Equal(login), "got %v want %v", got, login)
+}
+
+func TestRequireActiveWorker(t *testing.T) {
+	tok, err := IssueWorkerToken("ORG-1", "EMP-1", time.Minute)
+	require.NoError(t, err)
+
+	for name, tc := range map[string]struct {
+		active bool
+		err    error
+		want   int
+	}{
+		"active":       {true, nil, http.StatusOK},
+		"deactivated":  {false, nil, http.StatusUnauthorized},
+		"lookup error": {true, assert.AnError, http.StatusUnauthorized},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var asked string
+			check := RequireActiveWorker(func(id string) (bool, error) { asked = id; return tc.active, tc.err })
+			r := gin.New()
+			r.GET("/probe", JWTAuth(), RequireWorker(), check, okHandler)
+			assert.Equal(t, tc.want, doGet(r, tok).Code)
+			assert.Equal(t, "EMP-1", asked)
+		})
+	}
+}

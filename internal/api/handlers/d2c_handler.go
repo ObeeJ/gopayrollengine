@@ -93,8 +93,16 @@ func (h *D2CHandler) Signup(c *gin.Context) {
 	// employee — the obligation is driven by the org's operating currency,
 	// not by whether an employer is involved in onboarding.
 	requiresBVN := currency == money.NGN
-	if requiresBVN && req.BVN == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "bvn is required"})
+	if requiresBVN && !validBVN(req.BVN) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "bvn is required and must be 11 digits"})
+		return
+	}
+	if !validPhone(req.Phone) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "phone must be in international format, e.g. +2348012345678"})
+		return
+	}
+	if msg := bankDetailsError(currency, req.AccountNumber, req.BankCode); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": msg})
 		return
 	}
 

@@ -3,6 +3,8 @@ package middleware
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -21,10 +23,16 @@ const inflightTTL = 60 * time.Second
 // inflightSentinel — placeholder value while the handler is running.
 const inflightSentinel = "__inflight__"
 
-// cachedResponse — what we replay on retry: original status + body.
+// maxIdempotencyKeyLen — keys are client-chosen; bound what lands in Redis.
+const maxIdempotencyKeyLen = 255
+
+// cachedResponse — what we replay on retry: original status + body, plus a
+// digest of the request that produced it so a reused key with a different
+// payload is refused instead of answered with someone else's result.
 type cachedResponse struct {
-	Status int    `json:"status"`
-	Body   []byte `json:"body"`
+	Status      int    `json:"status"`
+	Body        []byte `json:"body"`
+	RequestHash string `json:"request_hash"`
 }
 
 // responseRecorder — wraps gin.ResponseWriter to capture the response for caching.
@@ -56,7 +64,28 @@ func Idempotency(rdb *redis.Client) gin.HandlerFunc {
 			return
 		}
 
-		redisKey := "idempotency:" + key
+		if len(key) > maxIdempotencyKeyLen {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Idempotency-Key is too long"})
+			c.Abort()
+			return
+		}
+
+		// Read the body up front: its digest is part of the idempotency
+		// contract. Re-injected below so the handler reads it normally.
+		bodyBytes, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "could not read request body"})
+			c.Abort()
+			return
+		}
+		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		sum := sha256.Sum256(bodyBytes)
+		requestHash := hex.EncodeToString(sum[:])
+
+		// Scoped by tenant and route. A global key let one org's retry
+		// replay another org's cached response (payroll IDs, employee
+		// records) and let the same key collide across endpoints.
+		redisKey := "idempotency:" + OrgID(c) + ":" + c.Request.Method + ":" + c.FullPath() + ":" + key
 		ctx := context.Background()
 
 		// O(1) Redis GET — check if this key was already processed.
@@ -74,6 +103,13 @@ func Idempotency(rdb *redis.Client) gin.HandlerFunc {
 			// Cache hit — replay the original response, do not re-execute the handler.
 			var resp cachedResponse
 			if json.Unmarshal(cached, &resp) == nil {
+				if resp.RequestHash != requestHash {
+					c.JSON(http.StatusUnprocessableEntity, gin.H{
+						"error": "Idempotency-Key was already used with a different request body",
+					})
+					c.Abort()
+					return
+				}
 				c.Header("Idempotent-Replayed", "true")
 				c.Data(resp.Status, "application/json", resp.Body)
 				c.Abort()
@@ -106,15 +142,11 @@ func Idempotency(rdb *redis.Client) gin.HandlerFunc {
 		}
 		c.Writer = rec
 
-		// Drain and re-inject the request body so the handler can read it normally.
-		bodyBytes, _ := io.ReadAll(c.Request.Body)
-		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-
 		c.Next()
 
 		// Cache only 2xx; on errors release the lock so the next retry isn't blocked.
 		if rec.status >= 200 && rec.status < 300 {
-			resp := cachedResponse{Status: rec.status, Body: rec.body.Bytes()}
+			resp := cachedResponse{Status: rec.status, Body: rec.body.Bytes(), RequestHash: requestHash}
 			if data, err := json.Marshal(resp); err == nil {
 				// Overwrite sentinel with the real response, extending TTL to the full retry window.
 				rdb.Set(ctx, redisKey, data, idempotencyTTL)

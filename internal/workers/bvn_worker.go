@@ -24,11 +24,7 @@ func NewBVNHandler() *BVNHandler { return &BVNHandler{} }
 
 // EnqueueBVNVerification — drops a BVN task on the low-priority queue; up to 5 retries on transient failure.
 func EnqueueBVNVerification(orgID, employeeID, bvn string) error {
-	payload, err := json.Marshal(map[string]string{
-		"org_id":      orgID,
-		"employee_id": employeeID,
-		"bvn":         bvn,
-	})
+	payload, err := bvnTaskPayload(orgID, employeeID, bvn)
 	if err != nil {
 		return err
 	}
@@ -38,6 +34,22 @@ func EnqueueBVNVerification(orgID, employeeID, bvn string) error {
 	)
 	_, err = Client.Enqueue(task)
 	return err
+}
+
+// bvnTaskPayload — the BVN is encrypted before it goes into the task: asynq
+// keeps payloads in Redis (including retries and the archive of dead
+// tasks), and a BVN is a national identifier that must not sit there in
+// plaintext.
+func bvnTaskPayload(orgID, employeeID, bvn string) ([]byte, error) {
+	enc, err := models.EncryptString(bvn)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt bvn: %w", err)
+	}
+	return json.Marshal(map[string]string{
+		"org_id":      orgID,
+		"employee_id": employeeID,
+		"bvn_enc":     enc,
+	})
 }
 
 type dojahBVNResponse struct {
@@ -52,10 +64,20 @@ type dojahBVNResponse struct {
 func (h *BVNHandler) ProcessBVNTask(ctx context.Context, t *asynq.Task) error {
 	var payload map[string]string
 	if err := json.Unmarshal(t.Payload(), &payload); err != nil {
-		return err
+		return fmt.Errorf("bvn task: bad payload: %w: %w", err, asynq.SkipRetry)
 	}
 
-	orgID, employeeID, bvn := payload["org_id"], payload["employee_id"], payload["bvn"]
+	orgID, employeeID := payload["org_id"], payload["employee_id"]
+	// "bvn" (plaintext) is only read so tasks queued before encryption was
+	// introduced still drain; new tasks carry "bvn_enc".
+	bvn := payload["bvn"]
+	if enc := payload["bvn_enc"]; enc != "" {
+		plain, err := models.DecryptString(enc)
+		if err != nil {
+			return fmt.Errorf("bvn task: decrypt: %w: %w", err, asynq.SkipRetry)
+		}
+		bvn = plain
+	}
 	log.Printf("Verifying BVN for employee %s org %s", employeeID, orgID)
 
 	v := &models.BVNVerification{

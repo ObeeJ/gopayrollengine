@@ -6,15 +6,15 @@ import (
 )
 
 type Config struct {
-	Port               string
-	DatabaseURL        string
-	RedisURL           string
-	AppAPIKey          string
-	AppMode            string
-	MockMode           bool
-	MonnifyAPIKey      string
-	MonnifySecretKey   string
-	MonnifyBaseURL     string
+	Port                string
+	DatabaseURL         string
+	RedisURL            string
+	AppAPIKey           string
+	AppMode             string
+	MockMode            bool
+	MonnifyAPIKey       string
+	MonnifySecretKey    string
+	MonnifyBaseURL      string
 	MonnifySourceWallet string
 }
 

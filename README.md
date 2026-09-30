@@ -356,14 +356,16 @@ docker-compose logs -f scheduler
 
 | Method | Path | Description |
 |:---|:---|:---|
-| `POST` | `/api/v1/auth/login` | Issue JWT |
-| `POST` | `/api/v1/auth/refresh` | Refresh token |
+| `POST` | `/api/v1/auth/login` | Employer login — issue JWT (5 attempts/min per IP) |
+| `POST` | `/api/v1/auth/refresh` | Refresh an employer token — only while the org is active, max 24h from login |
+| `POST` | `/api/v1/worker/auth/otp` | Send a worker a 6-digit login code by SMS (503 until an SMS provider is wired) |
+| `POST` | `/api/v1/worker/auth/login` | Worker login — phone + OTP; codes are single-use, 5 min, 5 guesses |
 
 **Employees**
 
 | Method | Path | Description |
 |:---|:---|:---|
-| `POST` | `/api/v1/employees/` | Create employee — BVN verified, consent recorded, PII encrypted |
+| `POST` | `/api/v1/employees/` | Create employee — BVN verified, consent recorded, PII encrypted; optional `phone` (E.164) creates the worker's app login |
 | `GET` | `/api/v1/employees/` | List employees (paginated) |
 
 **Payroll**

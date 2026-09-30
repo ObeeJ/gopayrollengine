@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
 
@@ -37,7 +38,11 @@ func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 		// BVN — required only for an NGN org (CBN's KYC requirement); not
 		// bound with "required" because that can't be conditioned on the
 		// org's currency, which isn't known until after binding.
-		BVN      string          `json:"bvn"`
+		BVN string `json:"bvn"`
+		// Phone — optional; when set, the employee gets a worker login
+		// (users row) so they can sign in to the worker app by OTP. Without
+		// it the employee is payroll-only.
+		Phone    string          `json:"phone"`
 		WageType models.WageType `json:"wage_type"` // "salaried" (default) or "hourly"
 
 		// Exactly one of these must be set, per WageType. Not bound with
@@ -81,8 +86,16 @@ func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 		return
 	}
 	requiresBVN := currency == money.NGN
-	if requiresBVN && req.BVN == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "bvn is required"})
+	if requiresBVN && !validBVN(req.BVN) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "bvn is required and must be 11 digits"})
+		return
+	}
+	if msg := bankDetailsError(currency, req.AccountNumber, req.BankCode); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": msg})
+		return
+	}
+	if req.Phone != "" && !validPhone(req.Phone) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "phone must be in international format, e.g. +2348012345678"})
 		return
 	}
 
@@ -102,6 +115,11 @@ func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 		if err := h.repo.WithTx(tx).Create(&emp); err != nil {
 			return err
 		}
+		if req.Phone != "" {
+			if err := tx.Create(&models.User{EmployeeID: emp.ID, OrgID: orgID, Phone: req.Phone}).Error; err != nil {
+				return err
+			}
+		}
 		if err := tx.Create(&models.ConsentRecord{
 			OrganizationID: orgID,
 			EmployeeID:     emp.ID,
@@ -117,6 +135,12 @@ func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 		return models.AppendAuditTx(tx, orgID, "Employee", emp.ID, "created",
 			"", emp.Name, c.ClientIP(), "")
 	}); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+			// idx_employees_org_email_hmac, or users.phone.
+			c.JSON(http.StatusConflict, gin.H{"error": "an employee with this email or phone already exists"})
+			return
+		}
 		middleware.Logger.Error("employee create transaction failed", "org_id", orgID, "error", err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create employee"})
 		return

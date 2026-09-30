@@ -3,6 +3,8 @@ package middleware
 import (
 	"go-payroll-engine/internal/observability"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -28,7 +30,15 @@ func newTokenBucket(capacity int, r rate.Limit, burst int) *tokenBucket {
 	return &tokenBucket{buckets: cache, r: r, burst: burst}
 }
 
-var globalBucket = newTokenBucket(rateLimiterCapacity, 10, 30) // 10 RPS sustained, burst 30
+var (
+	globalBucket = newTokenBucket(rateLimiterCapacity, 10, 30) // 10 RPS sustained, burst 30
+	// authBucket — credential, OTP and signup endpoints: burst 10, refilling
+	// one every 6s (10/min). Separate from globalBucket so ordinary API
+	// traffic can't be spent on it. Not tighter because Nigerian mobile
+	// carriers put many subscribers behind one CGNAT address; OTP guessing
+	// is bounded per phone by services.OTPService, not by this.
+	authBucket = newTokenBucket(rateLimiterCapacity, rate.Every(6*time.Second), 10)
+)
 
 // getLimiter — returns or creates the limiter for key; safe under concurrent access.
 func (tb *tokenBucket) getLimiter(key string) *rate.Limiter {
@@ -40,23 +50,25 @@ func (tb *tokenBucket) getLimiter(key string) *rate.Limiter {
 	return l
 }
 
-// RateLimit — token-bucket per API key, falling back to per-IP; 429 with Retry-After when empty.
-func RateLimit() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// Use API key as the bucket identity; fall back to IP for unauthenticated routes.
-		key := c.GetHeader("X-API-KEY")
-		if key == "" {
-			key = "ip:" + c.ClientIP()
-		}
+// RateLimit — token bucket per client IP; 429 with Retry-After when empty.
+//
+// Keyed on c.ClientIP() only. It used to key on the X-API-KEY header when
+// present, which is never validated, so sending a fresh random value per
+// request gave every request its own full bucket. ClientIP() honours
+// X-Forwarded-For only from proxies the engine trusts (see
+// api.configureTrustedProxies), so that header can't be spoofed either.
+func RateLimit() gin.HandlerFunc { return rateLimitWith(globalBucket, "ip", 1) }
 
-		limiter := globalBucket.getLimiter(key)
-		if !limiter.Allow() {
-			keyType := "api_key"
-			if key[:3] == "ip:" {
-				keyType = "ip"
-			}
+// AuthRateLimit — the stricter per-IP limit for login, OTP and signup
+// endpoints; stacks on top of RateLimit.
+func AuthRateLimit() gin.HandlerFunc { return rateLimitWith(authBucket, "auth_ip", 6) }
+
+func rateLimitWith(tb *tokenBucket, keyType string, retryAfterSeconds int) gin.HandlerFunc {
+	retryAfter := strconv.Itoa(retryAfterSeconds)
+	return func(c *gin.Context) {
+		if !tb.getLimiter(c.ClientIP()).Allow() {
 			observability.RateLimitHitsTotal.WithLabelValues(keyType).Inc()
-			c.Header("Retry-After", "1")
+			c.Header("Retry-After", retryAfter)
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"error": "rate limit exceeded — slow down and retry",
 			})

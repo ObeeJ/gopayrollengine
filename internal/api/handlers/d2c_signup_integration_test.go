@@ -32,7 +32,7 @@ func d2cSignupRequest(t *testing.T, body map[string]any) (*httptest.ResponseReco
 func validD2CSignupBody() map[string]any {
 	return map[string]any{
 		"name":                "Ada Worker",
-		"phone":               "+234" + uuid.New().String()[:10],
+		"phone":               testPhone(),
 		"email":               "ada-" + uuid.New().String()[:8] + "@example.com",
 		"account_number":      "0123456789",
 		"bank_code":           "058",

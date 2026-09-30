@@ -241,3 +241,20 @@ func TestWebhookConcurrency_DuplicateRefIsIdempotent(t *testing.T) {
 		Count(&auditCount).Error)
 	assert.Equal(t, int64(1), auditCount, "FSM CAS must keep exactly one transition audit entry")
 }
+
+// With MONNIFY_SECRET_KEY unset, HMAC(key="", body) is computable by
+// anyone, so every forged callback verified. Refuse instead.
+func TestMonnifyWebhook_UnsetSecretRefusesEverything(t *testing.T) {
+	t.Setenv("MONNIFY_SECRET_KEY", "")
+	body := []byte(`{"eventType":"SUCCESSFUL_DISBURSEMENT","eventData":{"reference":"ITEM-x"}}`)
+	mac := hmac.New(sha512.New, []byte(""))
+	mac.Write(body)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/monnify", bytes.NewReader(body))
+	c.Request.Header.Set("monnify-signature", hex.EncodeToString(mac.Sum(nil)))
+	(&WebhookHandler{}).HandleMonnifyWebhook(c)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+}

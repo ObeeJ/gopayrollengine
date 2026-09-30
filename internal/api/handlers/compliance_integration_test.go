@@ -43,9 +43,9 @@ func setupRLSRole(t *testing.T) {
 // audit data so a cross-tenant read would be immediately visible in the
 // compliance report's aggregate counts.
 type complianceFixtures struct {
-	orgA, orgB             string
-	aPayrolls, bPayrolls   int
-	aConsents, bConsents   int
+	orgA, orgB           string
+	aPayrolls, bPayrolls int
+	aConsents, bConsents int
 }
 
 func seedComplianceFixtures(t *testing.T) complianceFixtures {

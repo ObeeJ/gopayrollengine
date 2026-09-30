@@ -4,6 +4,7 @@ import (
 	"context"
 	"go-payroll-engine/internal/api"
 	"go-payroll-engine/internal/api/middleware"
+	"go-payroll-engine/internal/appenv"
 	"go-payroll-engine/internal/config"
 	"go-payroll-engine/internal/integrations/banklink"
 	"go-payroll-engine/internal/integrations/monnify"
@@ -26,15 +27,22 @@ import (
 func main() {
 	_ = godotenv.Load() // .env is optional; production uses real env vars
 
-	// Production refuses to start with mock money, missing encryption, or unsigned tokens.
-	if os.Getenv("APP_ENV") == "production" && os.Getenv("MOCK_MODE") == "true" {
-		log.Fatal("FATAL: MOCK_MODE=true is not allowed in production. Refusing to start.")
+	// Refuse to start without an explicit, recognised APP_ENV, and refuse
+	// insecure fallbacks anywhere but development/test. The old guards tested
+	// APP_ENV == "production", so a deployment that forgot APP_ENV (or wrote
+	// "prod") ran with a zero AES key, a public JWT secret and mock money.
+	if err := appenv.Validate(); err != nil {
+		log.Fatal("FATAL: ", err)
 	}
-	if os.Getenv("APP_ENV") == "production" && os.Getenv("ENCRYPTION_KEK") == "" {
-		log.Fatal("FATAL: ENCRYPTION_KEK is not set. PII would be stored in plaintext. Refusing to start.")
-	}
-	if os.Getenv("APP_ENV") == "production" && os.Getenv("JWT_SECRET") == "" {
-		log.Fatal("FATAL: JWT_SECRET is not set. Tokens would be unsigned. Refusing to start.")
+	if !appenv.AllowsInsecureDefaults() {
+		if os.Getenv("MOCK_MODE") == "true" {
+			log.Fatalf("FATAL: MOCK_MODE=true is only allowed when APP_ENV is development or test (got %q). Refusing to start.", appenv.Name())
+		}
+		for _, name := range []string{"ENCRYPTION_KEK", "ENCRYPTION_HMAC_KEY", "JWT_SECRET"} {
+			if os.Getenv(name) == "" {
+				log.Fatalf("FATAL: %s is not set (APP_ENV=%s). Refusing to start.", name, appenv.Name())
+			}
+		}
 	}
 
 	cfg := config.Load()

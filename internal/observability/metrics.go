@@ -83,7 +83,7 @@ var (
 	RateLimitHitsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "payroll_rate_limit_hits_total",
 		Help: "Requests rejected by rate limiter — sustained spike = abuse or misconfigured client.",
-	}, []string{"key_type"}) // "api_key" | "ip"
+	}, []string{"key_type"}) // "ip" | "auth_ip"
 
 	// Worker queue — answers "is the background job system keeping up?"
 	WorkerTasksTotal = promauto.NewCounterVec(prometheus.CounterOpts{

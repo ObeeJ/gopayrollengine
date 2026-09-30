@@ -8,7 +8,9 @@ import (
 	"crypto/sha256"
 	"database/sql/driver"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"go-payroll-engine/internal/appenv"
 	"io"
 	"log"
 	"os"
@@ -24,8 +26,8 @@ var hmacKey []byte
 func InitEncryption() {
 	hexKey := os.Getenv("ENCRYPTION_KEK")
 	if hexKey == "" {
-		if os.Getenv("APP_ENV") == "production" {
-			log.Fatal("FATAL: ENCRYPTION_KEK is not set. Refusing to start in production.")
+		if !appenv.AllowsInsecureDefaults() {
+			log.Fatal("FATAL: ENCRYPTION_KEK is not set. Only development/test may fall back to a dev key.")
 		}
 		// Dev fallback — 32 zero bytes; loud and obvious.
 		log.Println("WARNING: ENCRYPTION_KEK not set — using insecure dev key. Set it before going live.")
@@ -40,7 +42,7 @@ func InitEncryption() {
 
 	hexHMAC := os.Getenv("ENCRYPTION_HMAC_KEY")
 	if hexHMAC == "" {
-		if os.Getenv("APP_ENV") == "production" {
+		if !appenv.AllowsInsecureDefaults() {
 			log.Fatal("FATAL: ENCRYPTION_HMAC_KEY is not set. Required for PII blind indexing.")
 		}
 		log.Println("WARNING: ENCRYPTION_HMAC_KEY not set — using insecure dev HMAC key.")
@@ -82,6 +84,13 @@ func encrypt(plaintext string) (string, error) {
 	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
+
+// EncryptString — AES-GCM-encrypts s for storage outside the database
+// (e.g. a task payload sitting in Redis). Reverse with DecryptString.
+func EncryptString(s string) (string, error) { return encrypt(s) }
+
+// DecryptString — reverses EncryptString; errors if the ciphertext was tampered with.
+func DecryptString(s string) (string, error) { return decrypt(s) }
 
 // decrypt — reverses encrypt; returns an error if the ciphertext was tampered with.
 func decrypt(encoded string) (string, error) {
@@ -143,7 +152,9 @@ func (e *EncryptedString) Scan(value interface{}) error {
 
 // MarshalJSON — emits a masked view; callers needing plaintext must call .String() explicitly.
 func (e EncryptedString) MarshalJSON() ([]byte, error) {
-	return []byte(`"` + maskPII(string(e)) + `"`), nil
+	// json.Marshal, not string concatenation: the masked tail is user data
+	// and may contain a quote or backslash.
+	return json.Marshal(maskPII(string(e)))
 }
 
 // maskPII — keeps the last four characters; masks everything if there aren't five to spare.

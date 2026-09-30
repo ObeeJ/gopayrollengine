@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"go-payroll-engine/internal/appenv"
 	"net/http"
 	"os"
 	"time"
@@ -52,7 +53,7 @@ func (h *HealthHandler) Readiness(c *gin.Context) {
 	}
 
 	// Encryption — if the KEK is missing, PII writes will fail silently.
-	if os.Getenv("ENCRYPTION_KEK") == "" && os.Getenv("APP_ENV") == "production" {
+	if os.Getenv("ENCRYPTION_KEK") == "" && !appenv.AllowsInsecureDefaults() {
 		checks["encryption"] = "kek_missing"
 		healthy = false
 	} else {

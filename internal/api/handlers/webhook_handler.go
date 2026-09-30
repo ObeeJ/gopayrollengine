@@ -60,6 +60,14 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 	secret := os.Getenv("MONNIFY_SECRET_KEY")
 	signature := c.GetHeader("monnify-signature")
 
+	// An unset secret makes HMAC(key="", body) something anyone can compute,
+	// so every forged callback would verify. Refuse rather than accept.
+	if secret == "" {
+		middleware.Logger.Error("monnify webhook rejected: MONNIFY_SECRET_KEY is not set")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "webhook verification is not configured"})
+		return
+	}
+
 	// Read body once — used for both HMAC verification and JSON decode.
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {

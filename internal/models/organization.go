@@ -50,9 +50,12 @@ func (o *Organization) BeforeCreate(tx *gorm.DB) (err error) {
 	return
 }
 
-// SetPassword — hashes the password with bcrypt cost 12; never store plaintext.
+// PasswordCost — bcrypt work factor for org passwords.
+const PasswordCost = 12
+
+// SetPassword — hashes the password with bcrypt at PasswordCost; never store plaintext.
 func (o *Organization) SetPassword(plain string) error {
-	hash, err := bcrypt.GenerateFromPassword([]byte(plain), 12)
+	hash, err := bcrypt.GenerateFromPassword([]byte(plain), PasswordCost)
 	if err != nil {
 		return err
 	}

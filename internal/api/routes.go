@@ -9,7 +9,9 @@ import (
 	"go-payroll-engine/internal/repository"
 	"go-payroll-engine/internal/services"
 	"go-payroll-engine/internal/workers"
+	"log"
 	"os"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -18,6 +20,7 @@ import (
 // SetupRouter — composition root; repositories are born here and injected everywhere else.
 func SetupRouter() *gin.Engine {
 	r := gin.New()
+	configureTrustedProxies(r)
 
 	// Global stack — order is load-bearing: security before logging, logging before throttle.
 	r.Use(middleware.SecurityHeaders())
@@ -40,7 +43,16 @@ func SetupRouter() *gin.Engine {
 	userRepo := repository.NewUserRepository(models.DB)
 	// Handlers — dependencies injected, no handler touches models.DB directly.
 	authHandler := &handlers.AuthHandler{OrgRepo: orgRepo}
-	workerAuthHandler := handlers.NewWorkerAuthHandler(userRepo, empRepo)
+	// Worker login is OTP-only. No real SMS provider is integrated yet, so
+	// outside MOCK_MODE the sender is nil and both worker-auth endpoints
+	// answer 503 — refusing logins beats the previous behaviour of
+	// accepting any code for any phone number. Wire a real OTPSender here
+	// before launching the worker app.
+	var otpSender services.OTPSender
+	if os.Getenv("MOCK_MODE") == "true" {
+		otpSender = services.LogOTPSender{}
+	}
+	workerAuthHandler := handlers.NewWorkerAuthHandler(userRepo, empRepo, services.NewOTPService(workers.RDB, otpSender))
 	ewaService := services.NewEWAService()
 	// D2C eligibility (services.EWAService.D2CProvider) reads from the same
 	// banklink.Provider the bank-link endpoints below write to — one shared
@@ -74,13 +86,15 @@ func SetupRouter() *gin.Engine {
 		// Public auth — employer login + token refresh.
 		auth := v1.Group("/auth")
 		{
-			auth.POST("/login", authHandler.Login)
-			auth.POST("/refresh", middleware.JWTAuth(), authHandler.RefreshToken)
+			auth.POST("/login", middleware.AuthRateLimit(), authHandler.Login)
+			auth.POST("/refresh", middleware.JWTAuth(), middleware.RequireEmployer(), authHandler.RefreshToken)
 		}
 
 		// Worker auth — OTP login, issues employee-scoped JWT.
 		workerAuth := v1.Group("/worker/auth")
 		{
+			workerAuth.Use(middleware.AuthRateLimit())
+			workerAuth.POST("/otp", workerAuthHandler.RequestOTP)
 			workerAuth.POST("/login", workerAuthHandler.WorkerLogin)
 		}
 
@@ -102,7 +116,7 @@ func SetupRouter() *gin.Engine {
 
 		// D2C signup — public, same posture as /auth/login and
 		// /worker/auth/login: there is no identity yet to gate this behind.
-		v1.POST("/d2c/signup", d2cHandler.Signup)
+		v1.POST("/d2c/signup", middleware.AuthRateLimit(), d2cHandler.Signup)
 
 		// Employer routes — JWT → tenant → residency → employer gate → role gate.
 		employer := v1.Group("/")
@@ -178,6 +192,13 @@ func SetupRouter() *gin.Engine {
 		worker.Use(middleware.TenantMiddleware())
 		worker.Use(middleware.DataResidency())
 		worker.Use(middleware.RequireWorker())
+		worker.Use(middleware.RequireActiveWorker(func(employeeID string) (bool, error) {
+			u, err := userRepo.FindByEmployeeID(employeeID)
+			if err != nil {
+				return false, err
+			}
+			return u.IsActive, nil
+		}))
 		{
 			worker.GET("/wages", advanceHandler.GetEarnedWages)
 			worker.POST("/advances", advanceHandler.RequestAdvance)
@@ -218,4 +239,21 @@ func SetupRouter() *gin.Engine {
 	}
 
 	return r
+}
+
+// configureTrustedProxies — gin trusts every proxy by default, which makes
+// c.ClientIP() whatever the caller writes in X-Forwarded-For: a rate-limit
+// bypass, and a forged IP in every audit and consent record. Trust none
+// unless TRUSTED_PROXIES (comma-separated IPs/CIDRs of the TLS-terminating
+// proxy in front of the API) says otherwise.
+func configureTrustedProxies(r *gin.Engine) {
+	var proxies []string
+	for _, p := range strings.Split(os.Getenv("TRUSTED_PROXIES"), ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			proxies = append(proxies, p)
+		}
+	}
+	if err := r.SetTrustedProxies(proxies); err != nil {
+		log.Fatalf("FATAL: invalid TRUSTED_PROXIES: %v", err)
+	}
 }

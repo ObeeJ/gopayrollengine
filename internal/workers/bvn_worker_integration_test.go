@@ -4,7 +4,6 @@ package workers
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
 	"go-payroll-engine/internal/models"
@@ -45,9 +44,7 @@ func TestProcessBVNTask_PersistsUnderProductionRole(t *testing.T) {
 
 	testutil.UseAppRoleDB(t)
 
-	payload, err := json.Marshal(map[string]string{
-		"org_id": orgID, "employee_id": employeeID, "bvn": "12345678901",
-	})
+	payload, err := bvnTaskPayload(orgID, employeeID, "12345678901")
 	require.NoError(t, err)
 
 	err = NewBVNHandler().ProcessBVNTask(context.Background(), asynq.NewTask(TypeVerifyBVN, payload))

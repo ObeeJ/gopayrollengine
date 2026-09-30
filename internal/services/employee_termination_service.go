@@ -48,6 +48,13 @@ func (s *EmployeeTerminationService) Terminate(
 				return err
 			}
 			emp.IsActive = false
+			// Revoke the worker login too: without this a terminated worker
+			// could still OTP in and use the worker app (time entries,
+			// bills, bank-link) indefinitely.
+			if err := tx.Model(&models.User{}).Where("employee_id = ?", employeeID).
+				Update("is_active", false).Error; err != nil {
+				return err
+			}
 			if err := models.AppendAuditTx(tx, orgID, "Employee", employeeID, "terminated",
 				"active", reason, actorIP, ""); err != nil {
 				return err

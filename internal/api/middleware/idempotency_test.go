@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -189,4 +190,80 @@ func TestIdempotency_BodyDrainPreserved(t *testing.T) {
 	w := doPost(t, r, `{"hello":"world"}`, "echo-key")
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.JSONEq(t, `{"hello":"world"}`, w.Body.String())
+}
+
+// newScopedIdempotencyRouter — like newTestIdempotencyRouter, but the org
+// comes from an X-Test-Org header (standing in for TenantMiddleware) and two
+// routes share the middleware, so key scoping can be exercised.
+func newScopedIdempotencyRouter(t *testing.T) (*gin.Engine, *atomic.Int32) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	r := gin.New()
+	r.Use(func(c *gin.Context) { c.Set(OrgIDKey, c.GetHeader("X-Test-Org")); c.Next() })
+	var hits atomic.Int32
+	handler := func(c *gin.Context) {
+		n := hits.Add(1)
+		c.JSON(http.StatusCreated, gin.H{"org": OrgID(c), "path": c.FullPath(), "hit": n})
+	}
+	r.POST("/pay", Idempotency(rdb), handler)
+	r.POST("/other", Idempotency(rdb), handler)
+	return r, &hits
+}
+
+func scopedPost(r *gin.Engine, path, org, key, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Test-Org", org)
+	req.Header.Set("Idempotency-Key", key)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+// Regression: the Redis key was "idempotency:"+key, global across tenants,
+// so org B sending a key org A had used got org A's cached response back.
+func TestIdempotency_KeyIsScopedPerOrg(t *testing.T) {
+	r, hits := newScopedIdempotencyRouter(t)
+
+	a := scopedPost(r, "/pay", "ORG-A", "shared-key", `{"period":"2026-09"}`)
+	require.Equal(t, http.StatusCreated, a.Code)
+	b := scopedPost(r, "/pay", "ORG-B", "shared-key", `{"period":"2026-09"}`)
+	require.Equal(t, http.StatusCreated, b.Code)
+
+	assert.Empty(t, b.Header().Get("Idempotent-Replayed"), "org B must not receive org A's replay")
+	assert.Contains(t, b.Body.String(), `"org":"ORG-B"`)
+	assert.Equal(t, int32(2), hits.Load())
+}
+
+func TestIdempotency_KeyIsScopedPerRoute(t *testing.T) {
+	r, hits := newScopedIdempotencyRouter(t)
+
+	require.Equal(t, http.StatusCreated, scopedPost(r, "/pay", "ORG-A", "k1", `{}`).Code)
+	other := scopedPost(r, "/other", "ORG-A", "k1", `{}`)
+	require.Equal(t, http.StatusCreated, other.Code)
+	assert.Contains(t, other.Body.String(), `"path":"/other"`)
+	assert.Equal(t, int32(2), hits.Load())
+}
+
+func TestIdempotency_SameKeyDifferentBodyIsRefused(t *testing.T) {
+	r, hits := newScopedIdempotencyRouter(t)
+
+	require.Equal(t, http.StatusCreated, scopedPost(r, "/pay", "ORG-A", "k2", `{"period":"2026-09"}`).Code)
+	w := scopedPost(r, "/pay", "ORG-A", "k2", `{"period":"2026-10"}`)
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+	assert.Equal(t, int32(1), hits.Load(), "a different payload under a reused key must not run or replay")
+
+	same := scopedPost(r, "/pay", "ORG-A", "k2", `{"period":"2026-09"}`)
+	assert.Equal(t, http.StatusCreated, same.Code)
+	assert.Equal(t, "true", same.Header().Get("Idempotent-Replayed"))
+}
+
+func TestIdempotency_OverlongKeyRejected(t *testing.T) {
+	r, hits := newScopedIdempotencyRouter(t)
+	w := scopedPost(r, "/pay", "ORG-A", strings.Repeat("k", maxIdempotencyKeyLen+1), `{}`)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Equal(t, int32(0), hits.Load())
 }

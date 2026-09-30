@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"crypto/hmac"
+	"go-payroll-engine/internal/appenv"
 	"go-payroll-engine/internal/observability"
 	"log"
 	"net/http"
@@ -18,6 +19,10 @@ type Claims struct {
 	OrgID      string `json:"org_id"`
 	EmployeeID string `json:"employee_id"` // set only on worker tokens
 	Role       string `json:"role"`        // "admin" | "viewer" | "compliance" | "employee"
+	// AuthTime — when the holder last actually proved their credentials
+	// (unix seconds). Carried unchanged through refreshes so a session has
+	// a hard ceiling; see MaxSessionAge.
+	AuthTime int64 `json:"auth_time,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -28,8 +33,8 @@ var jwtSecret []byte
 func InitJWT() {
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
-		if os.Getenv("APP_ENV") == "production" {
-			log.Fatal("FATAL: JWT_SECRET not set. Refusing to start in production.")
+		if !appenv.AllowsInsecureDefaults() {
+			log.Fatal("FATAL: JWT_SECRET not set. Only development/test may fall back to a dev secret.")
 		}
 		log.Println("WARNING: JWT_SECRET not set — using insecure dev secret.")
 		secret = "dev-secret-change-me"
@@ -37,11 +42,24 @@ func InitJWT() {
 	jwtSecret = []byte(secret)
 }
 
-// IssueToken — mints a signed JWT for an employer org.
+// MaxSessionAge — how long refreshes may extend a session past its login.
+// Without a ceiling, a stolen token could be refreshed forever.
+const MaxSessionAge = 24 * time.Hour
+
+// AuthTimeKey — gin context key for the token's AuthTime.
+const AuthTimeKey = "auth_time"
+
+// IssueToken — mints a signed JWT for an employer org at login.
 func IssueToken(orgID, role string, ttl time.Duration) (string, error) {
+	return IssueRefreshedToken(orgID, role, time.Now(), ttl)
+}
+
+// IssueRefreshedToken — mints an employer JWT preserving the original login time.
+func IssueRefreshedToken(orgID, role string, authTime time.Time, ttl time.Duration) (string, error) {
 	claims := Claims{
-		OrgID: orgID,
-		Role:  role,
+		OrgID:    orgID,
+		Role:     role,
+		AuthTime: authTime.Unix(),
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -82,7 +100,7 @@ func JWTAuth() gin.HandlerFunc {
 				return nil, jwt.ErrSignatureInvalid
 			}
 			return jwtSecret, nil
-		})
+		}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}), jwt.WithExpirationRequired())
 
 		if err != nil || !token.Valid {
 			observability.AuthFailuresTotal.WithLabelValues("jwt_invalid").Inc()
@@ -95,6 +113,7 @@ func JWTAuth() gin.HandlerFunc {
 		c.Set(OrgIDKey, claims.OrgID)
 		c.Set("employee_id", claims.EmployeeID)
 		c.Set("role", claims.Role)
+		c.Set(AuthTimeKey, claims.AuthTime)
 		c.Next()
 	}
 }
@@ -137,6 +156,15 @@ func Role(c *gin.Context) string {
 	return r
 }
 
+// AuthTime — when the token holder last logged in; zero if the token predates the claim.
+func AuthTime(c *gin.Context) time.Time {
+	v, _ := c.Get(AuthTimeKey)
+	if t, ok := v.(int64); ok && t > 0 {
+		return time.Unix(t, 0)
+	}
+	return time.Time{}
+}
+
 // EmployeeID — worker's employee_id from ctx; empty means caller is an employer.
 func EmployeeID(c *gin.Context) string {
 	v, _ := c.Get("employee_id")
@@ -154,6 +182,23 @@ func RequireWorker() gin.HandlerFunc {
 		}
 		if EmployeeID(c) == "" {
 			c.JSON(http.StatusForbidden, gin.H{"error": "worker identity missing from token"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+// RequireActiveWorker — rejects a worker token whose login has since been
+// deactivated (termination, suspension). Worker tokens live 8h; without this
+// check, terminating someone left them in the worker app until it expired.
+// Runs after RequireWorker. isActive failing is treated as a denial.
+func RequireActiveWorker(isActive func(employeeID string) (bool, error)) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ok, err := isActive(EmployeeID(c))
+		if err != nil || !ok {
+			observability.AuthFailuresTotal.WithLabelValues("worker_inactive").Inc()
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired token"})
 			c.Abort()
 			return
 		}

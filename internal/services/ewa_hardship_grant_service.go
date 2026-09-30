@@ -7,6 +7,7 @@ import (
 
 	"go-payroll-engine/internal/models"
 	"go-payroll-engine/internal/observability"
+	"go-payroll-engine/internal/workers"
 	"go-payroll-engine/pkg/money"
 
 	"gorm.io/gorm"
@@ -25,11 +26,21 @@ func invalidHardshipGrant(reason string) error {
 // since a grant draws down the identical shared cash_settlement pool.
 var ErrHardshipGrantPoolExhausted = errors.New("hardship grant: employer funding pool exhausted")
 
+// ErrHardshipGrantEmployeeIneligible — the employee isn't in this org or is no longer active.
+var ErrHardshipGrantEmployeeIneligible = errors.New("hardship grant: employee not found or not active")
+
 // IssueHardshipGrant records an admin's decision to give a worker money
 // outright — a genuine alternative to a fourth advance, not another draw
 // against wages. Unlike RequestAdvance, there is no eligibility scoring and
 // no receivable: the ledger entry is Dr hardship_grant_expense /
 // Cr cash_settlement, an immediate, permanent expense.
+//
+// The grant starts Pending and is paid by a worker task
+// (workers.HardshipGrantDisbursementHandler) enqueued inside this same
+// transaction: if the enqueue fails the grant is rolled back and the admin
+// can simply retry, so a grant can never be recorded without a payout being
+// scheduled. A provider webhook then confirms (Disbursed) or reverses
+// (Failed) it — see models.ConfirmGrantDisbursed / models.FailGrant.
 //
 // Discretionary employer money requires a human decision, the same reason
 // employee termination and payroll creation are admin-only — see the
@@ -46,6 +57,27 @@ func (s *EWAService) IssueHardshipGrant(
 
 	var grant *models.EWAHardshipGrant
 	err := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
+		// Same per-org lock RequestAdvance takes: grants and advances draw
+		// on one funding pool, so the headroom check below must not
+		// interleave with either kind of concurrent draw.
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", "ewa_advance:"+orgID).Error; err != nil {
+			return err
+		}
+
+		// The employee_id foreign key alone would accept another org's
+		// employee. RLS already scopes this read; the explicit org filter
+		// keeps it correct under a role that bypasses RLS too.
+		var emp models.Employee
+		if err := tx.First(&emp, "id = ? AND organization_id = ?", employeeID, orgID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrHardshipGrantEmployeeIneligible
+			}
+			return err
+		}
+		if !emp.IsActive {
+			return ErrHardshipGrantEmployeeIneligible
+		}
+
 		policy, err := s.policyTx(tx, orgID)
 		if err != nil {
 			return err
@@ -109,6 +141,13 @@ func (s *EWAService) IssueHardshipGrant(
 			return err
 		}
 
+		// Last, so nothing after it can roll the grant back once a task
+		// exists. If the commit itself fails, the task finds no grant and
+		// exhausts its retries harmlessly.
+		if err := workers.EnqueueHardshipGrantDisbursement(orgID, g.ID); err != nil {
+			return fmt.Errorf("schedule grant payout: %w", err)
+		}
+
 		grant = &g
 		return nil
 	})
@@ -120,7 +159,7 @@ func (s *EWAService) ListHardshipGrants(ctx context.Context, orgID, employeeID s
 	var grants []models.EWAHardshipGrant
 	err := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
 		return tx.Where("employee_id = ?", employeeID).
-			Order("disbursed_at DESC").Find(&grants).Error
+			Order("created_at DESC").Find(&grants).Error
 	})
 	return grants, err
 }

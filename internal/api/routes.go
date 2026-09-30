@@ -130,7 +130,7 @@ func SetupRouter() *gin.Engine {
 				employees.POST("/", middleware.RequireRole("admin"), middleware.Idempotency(workers.RDB), empHandler.CreateEmployee)
 				employees.GET("/", empHandler.GetEmployees)
 				employees.POST("/:id/terminate", middleware.RequireRole("admin"), empHandler.TerminateEmployee)
-				employees.POST("/:id/hardship-grants", middleware.RequireRole("admin"), empHandler.IssueHardshipGrant)
+				employees.POST("/:id/hardship-grants", middleware.RequireRole("admin"), middleware.Idempotency(workers.RDB), empHandler.IssueHardshipGrant)
 				employees.GET("/:id/hardship-grants", empHandler.GetHardshipGrants)
 			}
 

@@ -123,6 +123,10 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 		h.handleEWAAdvanceWebhook(c, payload, ref)
 		return
 	}
+	if strings.HasPrefix(ref, "GRANT-") {
+		h.handleHardshipGrantWebhook(c, payload, ref)
+		return
+	}
 	h.handlePayrollItemWebhook(c, payload, ref)
 }
 
@@ -350,6 +354,67 @@ func (h *WebhookHandler) handleEWAAdvanceWebhook(c *gin.Context, payload Monnify
 		return
 	}
 
+	c.Status(http.StatusOK)
+}
+
+// handleHardshipGrantWebhook resolves a hardship grant's payout: success →
+// Disbursed, failure → Failed with the ledger entry reversed. Same shape and
+// same lookup-before-scoping justification as handleEWAAdvanceWebhook.
+func (h *WebhookHandler) handleHardshipGrantWebhook(c *gin.Context, payload MonnifyWebhookPayload, ref string) {
+	// SECURITY DEFINER lookup (migration 000033).
+	var grant models.EWAHardshipGrant
+	if err := models.DB.Raw(
+		"SELECT * FROM lookup_hardship_grant_for_webhook(?)", ref,
+	).Scan(&grant).Error; err != nil || grant.ID == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Grant not found"})
+		return
+	}
+
+	// Already resolved — a redelivery. 200 so Monnify stops retrying.
+	if grant.Status != models.GrantPending && grant.Status != models.GrantSubmitted {
+		c.Status(http.StatusOK)
+		return
+	}
+	orgID := grant.OrganizationID
+
+	var apply func(tx *gorm.DB) error
+	switch payload.EventType {
+	case "DISBURSEMENT_SUCCESSFUL":
+		disbursed, convErr := payload.disbursedKobo()
+		if convErr != nil {
+			middleware.Logger.Error("grant webhook amount unparseable",
+				"grant_id", grant.ID, "raw", payload.EventData.Amount.String(), "error", convErr.Error())
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid amount"})
+			return
+		}
+		if disbursed != grant.AmountKobo {
+			observability.WebhookAmountMismatchTotal.WithLabelValues(orgID).Inc()
+			middleware.Logger.Error("CRITICAL: grant webhook amount does not match grant amount",
+				"grant_id", grant.ID, "expected_kobo", int64(grant.AmountKobo), "reported_kobo", int64(disbursed))
+			if auditErr := models.WithOrgScope(c.Request.Context(), orgID, func(tx *gorm.DB) error {
+				return models.AppendAuditTx(tx, orgID, "EWAHardshipGrant", grant.ID, "amount_mismatch",
+					grant.AmountKobo.String(), disbursed.String(), c.ClientIP(), "")
+			}); auditErr != nil {
+				middleware.Logger.Error("grant amount mismatch audit write failed",
+					"grant_id", grant.ID, "error", auditErr.Error())
+			}
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "amount mismatch"})
+			return
+		}
+		apply = func(tx *gorm.DB) error { return models.ConfirmGrantDisbursed(tx, &grant) }
+	case "DISBURSEMENT_FAILED":
+		apply = func(tx *gorm.DB) error { return models.FailGrant(tx, &grant, "provider_disbursement_failed") }
+	default:
+		c.Status(http.StatusOK)
+		return
+	}
+
+	if err := models.WithOrgScope(c.Request.Context(), orgID, apply); err != nil &&
+		!errors.Is(err, models.ErrStaleStatus) { // stale: a concurrent delivery already won
+		middleware.Logger.Error("grant webhook processing failed", "grant_id", grant.ID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "webhook processing failed"})
+		return
+	}
 	c.Status(http.StatusOK)
 }
 

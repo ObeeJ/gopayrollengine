@@ -240,6 +240,10 @@ func (h *EmployeeHandler) IssueHardshipGrant(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, services.ErrHardshipGrantEmployeeIneligible) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "employee not found or no longer active"})
+			return
+		}
 		if errors.Is(err, services.ErrHardshipGrantPoolExhausted) {
 			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 			return

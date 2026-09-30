@@ -179,6 +179,7 @@ func startWorker(redisAddr string) {
 	mux.HandleFunc(workers.TypeProcessPayroll, workers.NewPayrollHandler().ProcessPayrollTask)
 	mux.HandleFunc(workers.TypeVerifyBVN, workers.NewBVNHandler().ProcessBVNTask)
 	mux.HandleFunc(workers.TypeDisburseEWAAdvance, workers.NewEWADisbursementHandler(registry).ProcessEWADisbursementTask)
+	mux.HandleFunc(workers.TypeDisburseGrant, workers.NewHardshipGrantDisbursementHandler(registry).ProcessHardshipGrantDisbursementTask)
 
 	log.Println("Worker server starting...")
 

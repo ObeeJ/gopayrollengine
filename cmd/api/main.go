@@ -108,6 +108,24 @@ func main() {
 		if run.Alerted {
 			log.Printf("reconciliation ALERTED: drift=%v", *run.DriftKobo)
 		}
+	case "create-org":
+		// Employer onboarding: ORG_NAME, ADMIN_EMAIL, optional ORG_CURRENCY
+		// (default NGN). Prints the first admin's one-time password to stdout;
+		// they must change it at first login. Run with the migration/owner
+		// database role, like the other operator modes.
+		cur, err := money.ParseCurrency(envOr("ORG_CURRENCY", "NGN"))
+		if err != nil {
+			log.Fatal("create-org: ", err)
+		}
+		org, user, temp, err := services.NewEmployerUserService().CreateOrganization(
+			context.Background(), os.Getenv("ORG_NAME"), cur, os.Getenv("ADMIN_EMAIL"))
+		if err != nil {
+			log.Fatal("create-org: ", err)
+		}
+		log.Printf("created organization %s (%s)", org.ID, org.Name)
+		log.Printf("first admin: %s (%s)", user.Email, user.ID)
+		// stdout, not the log: this is the only time the password is shown.
+		println("temporary password (shown once): " + temp)
 	case "collect-d2c-debits":
 		// Deliberately not in config/scheduler-crontab yet — see its own
 		// comment on why — until a real banklink debit provider exists.
@@ -212,4 +230,11 @@ func startWorker(redisAddr string) {
 	log.Println("Shutting down worker...")
 	srv.Shutdown()
 	log.Println("Worker exited gracefully")
+}
+
+func envOr(name, def string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return def
 }

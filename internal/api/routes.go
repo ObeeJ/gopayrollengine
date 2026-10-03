@@ -42,7 +42,9 @@ func SetupRouter() *gin.Engine {
 	orgRepo := repository.NewOrganizationRepository(models.DB)
 	userRepo := repository.NewUserRepository(models.DB)
 	// Handlers — dependencies injected, no handler touches models.DB directly.
-	authHandler := &handlers.AuthHandler{OrgRepo: orgRepo}
+	employerUsers := services.NewEmployerUserService()
+	authHandler := &handlers.AuthHandler{OrgRepo: orgRepo, Users: employerUsers}
+	employerUserHandler := &handlers.EmployerUserHandler{Users: employerUsers}
 	// Worker login is OTP-only. No real SMS provider is integrated yet, so
 	// outside MOCK_MODE the sender is nil and both worker-auth endpoints
 	// answer 503 — refusing logins beats the previous behaviour of
@@ -89,6 +91,7 @@ func SetupRouter() *gin.Engine {
 		{
 			auth.POST("/login", middleware.AuthRateLimit(), authHandler.Login)
 			auth.POST("/refresh", middleware.JWTAuth(), middleware.RequireEmployer(), authHandler.RefreshToken)
+			auth.POST("/password", middleware.AuthRateLimit(), middleware.JWTAuth(), middleware.RequireEmployer(), middleware.RequireActiveEmployerUser(employerUsers.IsActive), authHandler.ChangePassword)
 		}
 
 		// Worker auth — OTP login, issues employee-scoped JWT.
@@ -125,7 +128,17 @@ func SetupRouter() *gin.Engine {
 		employer.Use(middleware.TenantMiddleware())
 		employer.Use(middleware.DataResidency())
 		employer.Use(middleware.RequireEmployer())
+		employer.Use(middleware.RequireActiveEmployerUser(employerUsers.IsActive))
+		employer.Use(middleware.RequirePasswordChanged())
 		{
+			users := employer.Group("/users", middleware.RequireRole("admin"))
+			{
+				users.POST("/", employerUserHandler.Create)
+				users.GET("/", employerUserHandler.List)
+				users.PATCH("/:id", employerUserHandler.Update)
+				users.POST("/:id/reset-password", employerUserHandler.ResetPassword)
+			}
+
 			employees := employer.Group("/employees")
 			{
 				employees.POST("/", middleware.RequireRole("admin"), middleware.Idempotency(workers.RDB), empHandler.CreateEmployee)

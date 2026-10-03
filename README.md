@@ -354,9 +354,19 @@ docker-compose logs -f scheduler
 
 **Authentication**
 
+Onboard an employer with the operator mode (run as a role that can write `organizations`; prints the first admin's one-time password once):
+
+```bash
+APP_MODE=create-org ORG_NAME="Swift Logistics Ltd" ADMIN_EMAIL=ada@swift.example ./payroll
+```
+
 | Method | Path | Description |
 |:---|:---|:---|
-| `POST` | `/api/v1/auth/login` | Employer login — issue JWT (5 attempts/min per IP) |
+| `POST` | `/api/v1/auth/login` | Employer login — `{email, password}` for a named person (preferred) or `{org_id, password}` for the legacy shared org password. 5 attempts/min per IP |
+| `POST` | `/api/v1/auth/password` | A person changes their own password. A session started with a temporary password can do nothing else until this succeeds |
+| `GET/POST` | `/api/v1/users/` | Admin: list the organisation's people / add one (role `admin`, `viewer` or `compliance`). The one-time temporary password is returned once |
+| `PATCH` | `/api/v1/users/:id` | Admin: change role or `is_active`. Deactivation revokes live tokens immediately; an org can never be left without an active admin |
+| `POST` | `/api/v1/users/:id/reset-password` | Admin: issue a new one-time password |
 | `POST` | `/api/v1/auth/refresh` | Refresh an employer token — only while the org is active, max 24h from login |
 | `POST` | `/api/v1/worker/auth/otp` | Send a worker a 6-digit login code by SMS (503 until an SMS provider is wired) |
 | `POST` | `/api/v1/worker/auth/login` | Worker login — phone + OTP; codes are single-use, 5 min, 5 guesses |

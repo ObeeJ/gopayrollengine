@@ -84,7 +84,7 @@ func (h *PayrollHandler) ListPayrolls(c *gin.Context) {
 func (h *PayrollHandler) RetryPayroll(c *gin.Context) {
 	orgID := middleware.OrgID(c)
 	res, err := h.Service.RetryFailedItems(c.Request.Context(), orgID, c.Param("id"),
-		services.Actor{Name: middleware.Role(c), IP: c.ClientIP()})
+		services.Actor{Name: middleware.ActorName(c), IP: c.ClientIP()})
 	switch {
 	case err == nil:
 		c.JSON(http.StatusAccepted, res)
@@ -127,7 +127,7 @@ func (h *PayrollHandler) ResolvePayrollItem(c *gin.Context) {
 	orgID := middleware.OrgID(c)
 	item, err := h.Service.ResolveItem(c.Request.Context(), orgID, c.Param("id"), c.Param("item_id"),
 		services.ResolveOutcome(req.Outcome), req.Note, req.Evidence,
-		services.Actor{Name: middleware.Role(c), IP: c.ClientIP()})
+		services.Actor{Name: middleware.ActorName(c), IP: c.ClientIP()})
 	switch {
 	case err == nil:
 		c.JSON(http.StatusOK, item)

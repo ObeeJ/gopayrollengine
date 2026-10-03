@@ -1,6 +1,7 @@
 package validate
 
 import (
+	"strings"
 	"testing"
 
 	"go-payroll-engine/pkg/money"
@@ -41,4 +42,11 @@ func TestEmail(t *testing.T) {
 	for _, e := range []string{"", "nope", "a@", "@b.ng", "A <a@b.ng>", "a@b.ng, c@d.ng", " a@b.ng"} {
 		assert.False(t, Email(e), "%q", e)
 	}
+}
+
+func TestPassword(t *testing.T) {
+	assert.NotEmpty(t, Password("short"))
+	assert.NotEmpty(t, Password(strings.Repeat("a", 73)))
+	assert.Empty(t, Password(strings.Repeat("a", 12)))
+	assert.Empty(t, Password(strings.Repeat("a", 72)))
 }

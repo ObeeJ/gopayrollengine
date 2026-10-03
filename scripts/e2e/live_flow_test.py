@@ -362,6 +362,42 @@ def employer_login(actor, org_id, password):
     return r
 
 
+def employer_login_email(actor, email, password, expect=200):
+    r = actor.call("POST", "/api/v1/auth/login", body={"email": email, "password": password},
+                   token=None, expect=expect, label="logs in with their own email and password")
+    if expect == 200:
+        require(r.status == 200 and r.get("token"), f"{actor.name} could not log in")
+        actor.token = r.get("token")
+    return r
+
+
+def onboard_org_via_cli(ctx, name, admin_email):
+    """The supported way to create an employer: the create-org operator mode."""
+    require(ctx.args.binary, "--binary is required to onboard employers")
+    env = {**os.environ, "APP_MODE": "create-org", "ORG_NAME": name, "ADMIN_EMAIL": admin_email}
+    p = subprocess.run([ctx.args.binary], env=env, capture_output=True, text=True, timeout=120)
+    out = p.stdout + p.stderr
+    org = re.search(r"created organization (ORG-[0-9a-f]+)", out)
+    pw = re.search(r"temporary password \(shown once\): (\S+)", out)
+    ctx.report.check("operator", f"create-org onboards {name} and prints a one-time password",
+                     p.returncode == 0 and bool(org) and bool(pw), short(out, 300))
+    require(org and pw, f"create-org failed for {name}")
+    return org.group(1), pw.group(1)
+
+
+def first_login_and_change(actor, email, temp, new_password):
+    """Temporary password -> locked session -> own password."""
+    r = employer_login_email(actor, email, temp)
+    actor.check("a temporary-password login is flagged must_change_password",
+                r.get("must_change_password") is True, short(r.text))
+    actor.call("GET", "/api/v1/employees/", expect=403,
+               label="…and can do nothing until the password is changed")
+    r = actor.call("POST", "/api/v1/auth/password", expect=200, label="sets their own password",
+                   body={"current_password": temp, "new_password": new_password})
+    require(r.status == 200 and r.get("token"), f"{actor.name} could not change password")
+    actor.token = r.get("token")
+
+
 def worker_login(ctx, actor, phone, wrong_code_first=False):
     off = ctx.log_offset()
     actor.call("POST", "/api/v1/worker/auth/otp", body={"phone": phone}, token=None,
@@ -443,25 +479,14 @@ def phase_ops_probes(ctx):
 
 def phase_operator(ctx):
     S = ctx.state
-    S["swift_pw"] = "Swift-" + uuid.uuid4().hex[:10]
+    S["swift_admin_email"] = f"ada-{uuid.uuid4().hex[:6]}@swift.example"
+    S["swift_pw"] = "Swift-pass-" + uuid.uuid4().hex[:10]
     S["kano_pw"] = "Kano-" + uuid.uuid4().hex[:10]
-    S["view_pw"] = "View-" + uuid.uuid4().hex[:10]
-    S["comp_pw"] = "Comp-" + uuid.uuid4().hex[:10]
-    S["swift"] = provision_employer(ctx, "Swift Logistics Ltd", S["swift_pw"], "admin")
+    S["swift"], S["swift_temp"] = onboard_org_via_cli(ctx, "Swift Logistics Ltd", S["swift_admin_email"])
+    # Kano is provisioned the legacy way (shared org password) on purpose, so
+    # the backward-compatible login stays covered.
     S["kano"] = provision_employer(ctx, "Kano Textiles", S["kano_pw"], "admin")
-    S["viewer_org"] = provision_employer(ctx, "Swift Logistics (finance view)", S["view_pw"], "viewer")
-    S["comp_org"] = provision_employer(ctx, "Swift Logistics (compliance)", S["comp_pw"], "compliance")
-    ctx.report.check("operator", "provisions four employer orgs (admin, admin, viewer, compliance)", True)
-    ctx.report.observe(
-        "operator", "No supported way to onboard an employer",
-        "There is no signup endpoint, admin endpoint or CLI mode that creates an employer org with a password. "
-        "The seeder creates ORG-DEMO-0001 with an empty password hash, which can never log in. This run had to "
-        "INSERT into organizations directly with a bcrypt hash.", "high")
-    ctx.report.observe(
-        "operator", "Roles belong to the organisation, not to people",
-        "An org has one password and one role. A 'viewer' or 'compliance' login therefore has to be a separate "
-        "organisation, which sees none of Swift's data. Real finance and compliance staff of Swift cannot be "
-        "given their own logins.", "high")
+    ctx.report.check("operator", "onboards two employer orgs (one via create-org, one legacy)", True)
 
 
 def phase_employer_setup(ctx, monnify):
@@ -469,9 +494,13 @@ def phase_employer_setup(ctx, monnify):
     ada = ctx.actor("employer", "Ada (HR admin, Swift)", "102.89.10.11")
     S["ada"] = ada
 
-    ada.call("POST", "/api/v1/auth/login", body={"org_id": S["swift"], "password": "wrong-password"},
+    ada.call("POST", "/api/v1/auth/login", body={"email": S["swift_admin_email"], "password": "wrong-password"},
              token=None, expect=401, label="wrong password is refused")
-    employer_login(ada, S["swift"], S["swift_pw"])
+    ada.call("POST", "/api/v1/auth/login", body={"email": "nobody@swift.example", "password": "wrong-password"},
+             token=None, expect=401, label="unknown email is refused the same way")
+    ada.call("POST", "/api/v1/auth/login", body={"org_id": S["swift"], "password": S["swift_temp"]},
+             token=None, expect=401, label="an onboarded org has no shared password to log in with")
+    first_login_and_change(ada, S["swift_admin_email"], S["swift_temp"], S["swift_pw"])
     r = ada.call("POST", "/api/v1/auth/refresh", expect=200, label="session renews while working")
     if r.get("token"):
         ada.token = r.get("token")
@@ -914,6 +943,55 @@ def retry_failed_payment(ada, monnify, pid, emeka_item):
     ada.call("POST", path, route=route, idem=True, expect=409, label="a fully paid batch cannot be retried")
 
 
+def manage_people(ctx, ada):
+    """Ada gives finance and compliance staff their own logins, then removes one."""
+    S = ctx.state
+    people = {}
+    for key, role, name, ip in [("tunde", "viewer", "Tunde (finance viewer)", "102.89.40.42"),
+                                ("kemi", "compliance", "Kemi (compliance)", "102.89.40.41")]:
+        email = f"{key}-{uuid.uuid4().hex[:6]}@swift.example"
+        r = ada.call("POST", "/api/v1/users/", body={"email": email, "name": name, "role": role},
+                     expect=201, label=f"adds {name} as a {role} on the same organisation")
+        require(r.status == 201, "could not create user")
+        temp = r.get("temporary_password")
+        ada.check(f"{name} gets a one-time password", bool(temp))
+        person = ctx.actor(role, name, ip)
+        pw = "Own-pass-" + uuid.uuid4().hex[:10]
+        first_login_and_change(person, email, temp, pw)
+        S[key], S[key + "_email"], S[key + "_pw"] = person, email, pw
+        people[key] = r.get("user", "id")
+    ada.call("POST", "/api/v1/users/", body={"email": "not-an-email", "role": "viewer"}, expect=400,
+             label="a malformed email is refused")
+    ada.call("POST", "/api/v1/users/", body={"email": S["swift_admin_email"].upper(), "role": "viewer"},
+             expect=409, label="a duplicate email (any case) is refused")
+    r = ada.call("GET", "/api/v1/users/", expect=200, label="lists the organisation's people")
+    users = r.get("users") or []
+    ada.check("three people: Ada, Tunde, Kemi", len(users) == 3, short(r.text))
+    ada_id = next((u["id"] for u in users if u["email"] == S["swift_admin_email"]), "")
+    S["tunde"].call("GET", "/api/v1/users/", expect=403, label="a viewer cannot manage people")
+    ada.call("PATCH", "/api/v1/users/" + (ada_id or "x"), body={"role": "viewer"}, expect=409,
+             label="cannot demote the only admin")
+
+    # Audit trail names the person, not the role.
+    who = ctx.sql("SELECT actor_key FROM audit_events WHERE organization_id = "
+                  f"{sql_literal(S['swift'])} AND action = 'user_created' AND actor_key LIKE 'EUS-%' LIMIT 1")
+    ada.check("a user created by a person is attributed to that person's id (EUS-…)", who.startswith("EUS-"), who)
+
+    # Removal takes effect immediately, even for a token still inside its 8h life.
+    old_token = S["tunde"].token
+    ada.call("PATCH", "/api/v1/users/" + people["tunde"], body={"is_active": False}, expect=200,
+             label="deactivates Tunde")
+    S["tunde"].token = old_token
+    S["tunde"].call("GET", "/api/v1/employees/", expect=401, label="Tunde's live token stops working at once")
+    employer_login_email(S["tunde"], S["tunde_email"], S["tunde_pw"], expect=401)
+    ada.call("PATCH", "/api/v1/users/" + people["tunde"], body={"is_active": True}, expect=200,
+             label="reinstates Tunde")
+    r = ada.call("POST", f"/api/v1/users/{people['tunde']}/reset-password", expect=200,
+                 label="resets Tunde's forgotten password")
+    first_login_and_change(S["tunde"], S["tunde_email"], r.get("temporary_password"),
+                           "Fresh-pass-" + uuid.uuid4().hex[:10])
+
+
 def phase_reporting(ctx):
     S = ctx.state
     ada = S["ada"]
@@ -921,22 +999,16 @@ def phase_reporting(ctx):
     ada.call("GET", "/api/v1/analytics/workforce-dependency", expect=200,
              label="views how reliant staff are on advances")
     ada.call("GET", "/api/v1/compliance/report", expect=403, label="an admin login cannot open the compliance report")
-    probe_missing(ada, "POST", "/api/v1/auth/password", "changing the employer password",
-                  "The org password set at provisioning can never be changed or reset through the product.",
-                  body={"current_password": S["swift_pw"], "new_password": "N3w-" + uuid.uuid4().hex[:10]})
+    manage_people(ctx, ada)
 
-    kemi = ctx.actor("compliance", "Kemi (compliance)", "102.89.40.41")
-    employer_login(kemi, S["comp_org"], S["comp_pw"])
+    kemi = S["kemi"]
     r = kemi.call("GET", "/api/v1/compliance/report", expect=200, label="downloads the 30-day evidence bundle")
     kemi.check("report covers Swift's payroll", (r.get("payroll_summary", "total_batches") or 0) > 0,
-               "compliance logins are their own empty org, so the report is about nothing: "
-               + short(r.text), kind="gap")
+               short(r.text))
 
-    tunde = ctx.actor("viewer", "Tunde (finance viewer)", "102.89.40.42")
-    employer_login(tunde, S["viewer_org"], S["view_pw"])
+    tunde = S["tunde"]
     r = tunde.call("GET", "/api/v1/employees/", expect=200, label="opens the staff list")
-    tunde.check("sees Swift's staff", (r.get("total") or 0) == 3,
-                "viewer logins are their own empty org: " + short(r.text), kind="gap")
+    tunde.check("sees Swift's staff", (r.get("total") or 0) == 3, short(r.text))
     tunde.call("PUT", "/api/v1/policy/", body={"max_accrual_pct": 100}, expect=403,
                label="cannot change the advance policy")
     tunde.call("POST", "/api/v1/employees/", body=employee_body("Ghost", salary=1_00), idem=True, expect=403,
@@ -1181,7 +1253,7 @@ def phase_attacker(ctx, monnify):
     spray = ctx.actor("attacker", "Attacker (password spraying)", "45.155.20.22")
     got429, retry_after = False, None
     for i in range(15):
-        r = spray.call("POST", "/api/v1/auth/login", body={"org_id": S["swift"], "password": f"guess-{i}"},
+        r = spray.call("POST", "/api/v1/auth/login", body={"email": S["swift_admin_email"], "password": f"guess-{i}"},
                        token=None, retry_429=False)
         if r.status == 429:
             got429, retry_after = True, r.headers.get("Retry-After")

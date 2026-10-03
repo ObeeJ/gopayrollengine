@@ -189,7 +189,7 @@ func (h *EmployeeHandler) UpdateEmployee(c *gin.Context) {
 		Name: req.Name, Email: req.Email, Phone: req.Phone,
 		AccountNumber: req.AccountNumber, BankCode: req.BankCode,
 		Salary: req.Salary, HourlyRateKobo: req.HourlyRateKobo,
-	}, services.Actor{Name: middleware.Role(c), IP: c.ClientIP()})
+	}, services.Actor{Name: middleware.ActorName(c), IP: c.ClientIP()})
 
 	var fieldErr *services.EmployeeFieldError
 	var pgErr *pgconn.PgError

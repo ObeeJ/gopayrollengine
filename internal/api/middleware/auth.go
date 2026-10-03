@@ -19,6 +19,12 @@ type Claims struct {
 	OrgID      string `json:"org_id"`
 	EmployeeID string `json:"employee_id"` // set only on worker tokens
 	Role       string `json:"role"`        // "admin" | "viewer" | "compliance" | "employee"
+	// UserID — the employer person behind the token (employer_users.id).
+	// Empty on legacy org-password tokens and on worker tokens.
+	UserID string `json:"user_id,omitempty"`
+	// MustChangePassword — the holder logged in with a temporary password and
+	// may do nothing but change it; see RequirePasswordChanged.
+	MustChangePassword bool `json:"must_change_password,omitempty"`
 	// AuthTime — when the holder last actually proved their credentials
 	// (unix seconds). Carried unchanged through refreshes so a session has
 	// a hard ceiling; see MaxSessionAge.
@@ -56,10 +62,18 @@ func IssueToken(orgID, role string, ttl time.Duration) (string, error) {
 
 // IssueRefreshedToken — mints an employer JWT preserving the original login time.
 func IssueRefreshedToken(orgID, role string, authTime time.Time, ttl time.Duration) (string, error) {
+	return IssueUserToken(orgID, "", role, false, authTime, ttl)
+}
+
+// IssueUserToken — mints an employer JWT for a named person (userID empty for
+// the legacy org-level login).
+func IssueUserToken(orgID, userID, role string, mustChange bool, authTime time.Time, ttl time.Duration) (string, error) {
 	claims := Claims{
-		OrgID:    orgID,
-		Role:     role,
-		AuthTime: authTime.Unix(),
+		OrgID:              orgID,
+		UserID:             userID,
+		MustChangePassword: mustChange,
+		Role:               role,
+		AuthTime:           authTime.Unix(),
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -114,6 +128,8 @@ func JWTAuth() gin.HandlerFunc {
 		c.Set("employee_id", claims.EmployeeID)
 		c.Set("role", claims.Role)
 		c.Set(AuthTimeKey, claims.AuthTime)
+		c.Set(UserIDKey, claims.UserID)
+		c.Set(MustChangeKey, claims.MustChangePassword)
 		c.Next()
 	}
 }
@@ -216,4 +232,68 @@ func RequireEmployer() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+const (
+	// UserIDKey / MustChangeKey — gin context keys for the per-person claims.
+	UserIDKey     = "user_id"
+	MustChangeKey = "must_change_password"
+)
+
+// UserID — the employer person's id; empty for legacy org-level tokens.
+func UserID(c *gin.Context) string {
+	v, _ := c.Get(UserIDKey)
+	id, _ := v.(string)
+	return id
+}
+
+// ActorName — who to put in the audit trail: the person when known, else the
+// role (legacy org-level logins).
+func ActorName(c *gin.Context) string {
+	if id := UserID(c); id != "" {
+		return id
+	}
+	return Role(c)
+}
+
+// RequirePasswordChanged — a session that began with a temporary password may
+// only reach the password-change endpoint (and refresh); everything else
+// answers 403 until the holder sets their own.
+func RequirePasswordChanged() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if must, _ := c.Get(MustChangeKey); must == true {
+			c.JSON(http.StatusForbidden, gin.H{"error": "password change required", "code": "password_change_required"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+// RequireActiveEmployerUser — rejects a token whose person has been
+// deactivated since it was issued (an 8h token otherwise outlives removal).
+// Legacy org-level tokens (no user id) pass through.
+func RequireActiveEmployerUser(isActive func(orgID, userID string) (bool, error)) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := UserID(c)
+		if id == "" {
+			c.Next()
+			return
+		}
+		ok, err := isActive(OrgID(c), id)
+		if err != nil || !ok {
+			observability.AuthFailuresTotal.WithLabelValues("employer_user_inactive").Inc()
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired token"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+// MustChange — whether the session is limited to changing the password.
+func MustChange(c *gin.Context) bool {
+	v, _ := c.Get(MustChangeKey)
+	b, _ := v.(bool)
+	return b
 }

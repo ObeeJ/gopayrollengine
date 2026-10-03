@@ -69,6 +69,7 @@ func SetupRouter() *gin.Engine {
 	empHandler := handlers.NewEmployeeHandler(empRepo, ewaService)
 	payrollService := services.NewPayrollService(payrollRepo, empRepo)
 	payrollHandler := &handlers.PayrollHandler{Service: payrollService}
+	payslipHandler := handlers.NewPayslipHandler(payrollService)
 	analyticsHandler := &handlers.AnalyticsHandler{Service: services.NewAnalyticsService(payrollRepo, empRepo)}
 	advanceHandler := handlers.NewAdvanceHandler(ewaService)
 	policyHandler := handlers.NewPolicyHandler(ewaService)
@@ -129,6 +130,7 @@ func SetupRouter() *gin.Engine {
 			{
 				employees.POST("/", middleware.RequireRole("admin"), middleware.Idempotency(workers.RDB), empHandler.CreateEmployee)
 				employees.GET("/", empHandler.GetEmployees)
+				employees.PATCH("/:id", middleware.RequireRole("admin"), empHandler.UpdateEmployee)
 				employees.POST("/:id/terminate", middleware.RequireRole("admin"), empHandler.TerminateEmployee)
 				employees.POST("/:id/hardship-grants", middleware.RequireRole("admin"), middleware.Idempotency(workers.RDB), empHandler.IssueHardshipGrant)
 				employees.GET("/:id/hardship-grants", empHandler.GetHardshipGrants)
@@ -204,6 +206,7 @@ func SetupRouter() *gin.Engine {
 		}))
 		{
 			worker.GET("/wages", advanceHandler.GetEarnedWages)
+			worker.GET("/payslips", payslipHandler.ListPayslips)
 			worker.POST("/advances", advanceHandler.RequestAdvance)
 			worker.GET("/advances", advanceHandler.GetAdvanceHistory)
 			worker.POST("/protected-payday", advanceHandler.SetProtectedPayday)

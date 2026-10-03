@@ -1,11 +1,13 @@
 package handlers
 
 import (
+	"encoding/json"
 	"errors"
 	"go-payroll-engine/internal/api/middleware"
 	"go-payroll-engine/internal/models"
 	"go-payroll-engine/internal/repository"
 	"go-payroll-engine/internal/services"
+	"go-payroll-engine/internal/validate"
 	"go-payroll-engine/internal/workers"
 	"go-payroll-engine/pkg/money"
 	"net/http"
@@ -18,13 +20,14 @@ import (
 
 type EmployeeHandler struct {
 	repo        repository.EmployeeRepository
+	employees   *services.EmployeeService
 	termination *services.EmployeeTerminationService
 	ewa         *services.EWAService
 }
 
 // NewEmployeeHandler — wires up the handler with its repository.
 func NewEmployeeHandler(r repository.EmployeeRepository, ewa *services.EWAService) *EmployeeHandler {
-	return &EmployeeHandler{repo: r, termination: services.NewEmployeeTerminationService(), ewa: ewa}
+	return &EmployeeHandler{repo: r, employees: services.NewEmployeeService(), termination: services.NewEmployeeTerminationService(), ewa: ewa}
 }
 
 // CreateEmployee — admin-only; employee + consent + audit commit atomically, BVN reconciles out-of-band.
@@ -85,15 +88,15 @@ func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 		return
 	}
 	requiresBVN := currency == money.NGN
-	if requiresBVN && !validBVN(req.BVN) {
+	if requiresBVN && !validate.BVN(req.BVN) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "bvn is required and must be 11 digits"})
 		return
 	}
-	if msg := bankDetailsError(currency, req.AccountNumber, req.BankCode); msg != "" {
+	if msg := validate.BankDetails(currency, req.AccountNumber, req.BankCode); msg != "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": msg})
 		return
 	}
-	if req.Phone != "" && !validPhone(req.Phone) {
+	if req.Phone != "" && !validate.Phone(req.Phone) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "phone must be in international format, e.g. +2348012345678"})
 		return
 	}
@@ -155,6 +158,58 @@ func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, emp)
+}
+
+// UpdateEmployee — PATCH /api/v1/employees/:id. Admin-only partial update:
+// name, email, phone (the worker's login), bank details, salary or hourly
+// rate. Only the fields sent change; an unrecognised field is refused rather
+// than silently ignored (a client sending "is_active" must not believe it
+// worked). Bank details are re-read at send time, so a corrected account
+// applies to the next payment, including a retry of one that bounced.
+func (h *EmployeeHandler) UpdateEmployee(c *gin.Context) {
+	var req struct {
+		Name           *string     `json:"name"`
+		Email          *string     `json:"email"`
+		Phone          *string     `json:"phone"`
+		AccountNumber  *string     `json:"account_number"`
+		BankCode       *string     `json:"bank_code"`
+		Salary         *money.Kobo `json:"salary"`
+		HourlyRateKobo *money.Kobo `json:"hourly_rate_kobo"`
+	}
+	dec := json.NewDecoder(c.Request.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		respondBindError(c, err)
+		return
+	}
+
+	orgID := middleware.OrgID(c)
+	employeeID := c.Param("id")
+	emp, err := h.employees.UpdateEmployee(c.Request.Context(), orgID, employeeID, services.EmployeeUpdate{
+		Name: req.Name, Email: req.Email, Phone: req.Phone,
+		AccountNumber: req.AccountNumber, BankCode: req.BankCode,
+		Salary: req.Salary, HourlyRateKobo: req.HourlyRateKobo,
+	}, services.Actor{Name: middleware.Role(c), IP: c.ClientIP()})
+
+	var fieldErr *services.EmployeeFieldError
+	var pgErr *pgconn.PgError
+	switch {
+	case err == nil:
+		c.JSON(http.StatusOK, emp)
+	case errors.As(err, &fieldErr):
+		fields := map[string]string{fieldErr.Field: fieldErr.Problem}
+		c.JSON(http.StatusBadRequest, gin.H{"error": fieldErr.Error(), "fields": fields})
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "employee not found"})
+	case errors.Is(err, services.ErrEmployeeInactive):
+		c.JSON(http.StatusConflict, gin.H{"error": "this employee is no longer active and cannot be edited"})
+	case errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation:
+		// idx_employees_org_email_hmac, or users.phone.
+		c.JSON(http.StatusConflict, gin.H{"error": "another employee already uses this email or phone"})
+	default:
+		middleware.Logger.Error("employee update failed", "org_id", orgID, "employee_id", employeeID, "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update employee"})
+	}
 }
 
 // GetEmployees — paginated list scoped to the caller's org; RLS is the load-bearing fence.

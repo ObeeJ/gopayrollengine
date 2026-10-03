@@ -1,6 +1,10 @@
-package handlers
+// Package validate holds the field-format rules shared by the API handlers and
+// the services behind them (a service enforcing an invariant can't import the
+// handler layer). Pure functions, no I/O.
+package validate
 
 import (
+	"net/mail"
 	"regexp"
 
 	"go-payroll-engine/pkg/money"
@@ -22,15 +26,17 @@ var (
 	genericAccountPattern = regexp.MustCompile(`^[0-9A-Za-z]{4,34}$`)
 )
 
-func validPhone(p string) bool { return e164Pattern.MatchString(p) }
+// Phone reports whether p is a valid E.164 number.
+func Phone(p string) bool { return e164Pattern.MatchString(p) }
 
-func validBVN(b string) bool { return bvnPattern.MatchString(b) }
+// BVN reports whether b is a valid 11-digit BVN.
+func BVN(b string) bool { return bvnPattern.MatchString(b) }
 
-// bankDetailsError returns a client-facing message when an account number or
+// BankDetails returns a client-facing message when an account number or
 // bank code can't possibly be valid for currency, or "" when they can. A bad
 // account number otherwise surfaces only when the bank rejects the transfer
 // on payday, as a failed salary payment.
-func bankDetailsError(currency money.Currency, accountNumber, bankCode string) string {
+func BankDetails(currency money.Currency, accountNumber, bankCode string) string {
 	if currency == money.NGN {
 		if !nubanPattern.MatchString(accountNumber) {
 			return "account_number must be a 10-digit NUBAN"
@@ -47,4 +53,11 @@ func bankDetailsError(currency money.Currency, accountNumber, bankCode string) s
 		return "bank_code is required"
 	}
 	return ""
+}
+
+// Email reports whether e is a plausible bare address ("a@b.ng"). It rejects
+// display-name forms ("A <a@b.ng>"), which net/mail would otherwise accept.
+func Email(e string) bool {
+	addr, err := mail.ParseAddress(e)
+	return err == nil && addr.Address == e
 }

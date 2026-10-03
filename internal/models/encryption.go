@@ -178,3 +178,8 @@ func (e *EncryptedString) UnmarshalJSON(data []byte) error {
 
 // String — returns the plaintext value; safe for display, never for logging.
 func (e EncryptedString) String() string { return string(e) }
+
+// MaskPII keeps only the last four characters ("****6789") — enough for a
+// person to recognise a value, not enough to use or reconstruct it. Used
+// wherever PII must be described rather than stored, e.g. audit text.
+func MaskPII(s string) string { return maskPII(s) }

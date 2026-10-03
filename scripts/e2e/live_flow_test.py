@@ -818,6 +818,7 @@ def phase_payroll(ctx, monnify):
 
     # What Ada does next: Emeka's account was closed; he is paid through a retry.
     if emeka_item:
+        fix_bank_details(ctx, ada, S["emeka_id"])
         retry_failed_payment(ada, monnify, pid, emeka_item)
 
     r = ada.call("GET", "/api/v1/payrolls/?page=1&page_size=10", route="/api/v1/payrolls/", expect=200,
@@ -828,12 +829,57 @@ def phase_payroll(ctx, monnify):
 
     musa = S.get("musa")
     if musa:
-        probe_missing(musa, "GET", "/api/v1/worker/payslips", "payslips for workers",
-                      "Workers see advances and timesheets, but not what they were actually paid.")
+        check_payslips(ctx, musa, S, musa_item, chioma_item)
     if musa and S.get("musa_advance_id"):
         lr = musa.call("GET", "/api/v1/worker/advances", expect=200, label="checks his advance after payday")
         a = find(lr.get("data"), id=S["musa_advance_id"])
         musa.check("advance is settled by payroll", a and a.get("status") == "settled", short(lr.text))
+
+
+def fix_bank_details(ctx, ada, emeka_id):
+    """Emeka's account was closed. Ada corrects it (and is refused for bad input)."""
+    path, route = f"/api/v1/employees/{emeka_id}", "/api/v1/employees/:id"
+    ada.call("PATCH", path, route=route, body={}, expect=400, label="an empty update is refused")
+    ada.call("PATCH", path, route=route, body={"is_active": False}, expect=400,
+             label="an unrecognised field is refused, not silently ignored")
+    ada.call("PATCH", path, route=route, body={"account_number": "12345"}, expect=400,
+             label="a 5-digit account number is refused")
+    ada.call("PATCH", path, route=route, body={"hourly_rate_kobo": 100000}, expect=400,
+             label="an hourly rate on a salaried employee is refused")
+    new_account = rand_nuban()
+    r = ada.call("PATCH", path, route=route, body={"account_number": new_account, "bank_code": "033"},
+                 expect=200, label="corrects Emeka's closed bank account")
+    ada.check("the response masks the new account number",
+              r.get("account_number") == "****" + new_account[-4:] and new_account not in r.text, short(r.text))
+
+
+def check_payslips(ctx, musa, S, musa_item, chioma_item):
+    route = "/api/v1/worker/payslips"
+    r = musa.call("GET", route, expect=200, label="opens his payslips")
+    data = r.get("data") or []
+    musa.check("he sees exactly one payslip (his own, this month)", r.get("total") == 1 and len(data) == 1, short(r.text))
+    if not data:
+        return
+    p = data[0]
+    musa.check("it is for this month and shows as paid, with the date it landed",
+               p.get("period") == date.today().strftime("%Y-%m") and p.get("state") == "paid"
+               and bool(p.get("paid_at")), short(json.dumps(p)))
+    gross, adv, sav, net = p.get("gross"), p.get("advances_deducted"), p.get("savings"), p.get("net")
+    musa.check("the breakdown adds up: gross − advances − savings = net",
+               None not in (gross, adv, sav, net) and gross - adv - sav == net, short(json.dumps(p)))
+    musa.check("gross is his ₦300,000 salary and the advance he took is what was deducted",
+               gross == 300_000_00 and adv == S.get("musa_advance_amount"), short(json.dumps(p)))
+    musa.check("net matches what the bank was asked to pay", musa_item and net == musa_item["amount"],
+               f"payslip {net} vs payroll line {musa_item and musa_item['amount']}")
+    musa.check("no internal fields reach a worker",
+               not any(k in p for k in ("attempt", "resolved_by", "resolution_note", "error_message",
+                                        "organization_id", "employee_id")), short(json.dumps(p)))
+    chioma = S.get("chioma")
+    if chioma and chioma_item:
+        c = chioma.call("GET", route, expect=200, label="Chioma opens her payslips")
+        cd = (c.get("data") or [{}])[0]
+        chioma.check("she sees only her own line, with her own (hourly) pay",
+                     c.get("total") == 1 and cd.get("net") == chioma_item["amount"], short(c.text))
 
 
 def retry_failed_payment(ada, monnify, pid, emeka_item):
@@ -1084,6 +1130,9 @@ def phase_attacker(ctx, monnify):
                   label="Kano admin cannot read Swift's payroll")
     sani.call("POST", f"/api/v1/employees/{S['musa_id']}/terminate", route="/api/v1/employees/:id/terminate",
               body={"reason": "hostile"}, expect=404, label="Kano admin cannot terminate Swift's employee")
+    sani.call("PATCH", f"/api/v1/employees/{S['musa_id']}", route="/api/v1/employees/:id",
+              body={"account_number": rand_nuban()}, expect=404,
+              label="Kano admin cannot redirect Swift's employee's salary to another account")
     sani.call("POST", f"/api/v1/employees/{S['musa_id']}/hardship-grants",
               route="/api/v1/employees/:id/hardship-grants", body={"amount": 1_000_00, "reason": "x"},
               idem=True, expect=404, label="Kano admin cannot pay a grant to Swift's employee")

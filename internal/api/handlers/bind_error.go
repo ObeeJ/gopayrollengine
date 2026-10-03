@@ -62,6 +62,14 @@ func respondBindError(c *gin.Context, err error) {
 		return
 	}
 
+	// Strict decoders (json.Decoder.DisallowUnknownFields) report a stray field
+	// as a plain error: `json: unknown field "is_active"`.
+	if name, ok := unknownField(err); ok {
+		fields := map[string]string{name: "is not a recognised field"}
+		c.JSON(http.StatusBadRequest, gin.H{"error": summarise(fields), "fields": fields})
+		return
+	}
+
 	var syntaxErr *json.SyntaxError
 	if errors.As(err, &syntaxErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "request body must be valid JSON"})
@@ -70,6 +78,15 @@ func respondBindError(c *gin.Context, err error) {
 
 	// Anything else (custom UnmarshalJSON failures, e.g. a malformed amount).
 	c.JSON(http.StatusBadRequest, gin.H{"error": "request body is invalid"})
+}
+
+func unknownField(err error) (string, bool) {
+	const prefix = `json: unknown field "`
+	msg := err.Error()
+	if !strings.HasPrefix(msg, prefix) || !strings.HasSuffix(msg, `"`) {
+		return "", false
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(msg, prefix), `"`), true
 }
 
 func validationProblem(fe validator.FieldError) string {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"go-payroll-engine/internal/api"
 	"go-payroll-engine/internal/api/middleware"
 	"go-payroll-engine/internal/appenv"
@@ -122,10 +123,11 @@ func main() {
 		if err != nil {
 			log.Fatal("create-org: ", err)
 		}
-		log.Printf("created organization %s (%s)", org.ID, org.Name)
-		log.Printf("first admin: %s (%s)", user.Email, user.ID)
-		// stdout, not the log: this is the only time the password is shown.
-		println("temporary password (shown once): " + temp)
+		// Operator output, not application logs: values come from the operator's
+		// own environment, and the password must never reach a log pipeline.
+		fmt.Printf("created organization %s (%q)\n", org.ID, org.Name)
+		fmt.Printf("first admin: %q (%s)\n", user.Email, user.ID)
+		fmt.Printf("temporary password (shown once): %s\n", temp)
 	case "collect-d2c-debits":
 		// Deliberately not in config/scheduler-crontab yet — see its own
 		// comment on why — until a real banklink debit provider exists.

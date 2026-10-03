@@ -810,14 +810,23 @@ func TestEligibility_WorkerFloorCapsAvailable(t *testing.T) {
 	orgID, employeeID := seedWorker(t, salary)
 	svc := NewEWAService()
 
-	before, err := svc.GetEligibility(context.Background(), orgID, employeeID, time.Now())
+	// Late in the month, so accrual is well above the ₦10,000 the floor
+	// leaves spendable. On the first few working days of a month the
+	// policy cap alone is already below ₦10,000, the floor has nothing to
+	// reduce, and the "must reduce available" assertion failed for reasons
+	// unrelated to the floor.
+	now := time.Now()
+	asOf := time.Date(now.Year(), now.Month(), 25, 12, 0, 0, 0, now.Location())
+
+	before, err := svc.GetEligibility(context.Background(), orgID, employeeID, asOf)
 	require.NoError(t, err)
-	require.True(t, before.Available.IsPositive(), "expected headroom before the floor is set")
+	require.Greater(t, int64(before.Available), int64(money.FromNaira(10_000)),
+		"test setup needs more headroom than the floor leaves")
 
 	// Ask to protect nearly the whole salary, leaving only N10,000 spendable.
 	setProtectedPayday(t, orgID, employeeID, money.FromNaira(290_000))
 
-	after, err := svc.GetEligibility(context.Background(), orgID, employeeID, time.Now())
+	after, err := svc.GetEligibility(context.Background(), orgID, employeeID, asOf)
 	require.NoError(t, err)
 
 	assert.Equal(t, money.FromNaira(290_000), after.ProtectedPayday)

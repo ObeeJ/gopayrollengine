@@ -31,11 +31,13 @@ type recordingBank struct {
 	srv  *httptest.Server
 	mu   sync.Mutex
 	sent [][]string // references per bulk call
+	// accounts remembers the destination account each reference was sent to.
+	accounts map[string]string
 }
 
 func newRecordingBank(t *testing.T) *recordingBank {
 	t.Helper()
-	b := &recordingBank{}
+	b := &recordingBank{accounts: map[string]string{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/auth/login", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -47,10 +49,11 @@ func newRecordingBank(t *testing.T) *recordingBank {
 		var body monnify.BulkTransferRequest
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		refs := make([]string, 0, len(body.TransactionList))
+		b.mu.Lock()
 		for _, l := range body.TransactionList {
 			refs = append(refs, l.Reference)
+			b.accounts[l.Reference] = l.AccountNumber
 		}
-		b.mu.Lock()
 		b.sent = append(b.sent, refs)
 		b.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -74,6 +77,12 @@ func (b *recordingBank) calls() [][]string {
 	out := make([][]string, len(b.sent))
 	copy(out, b.sent)
 	return out
+}
+
+func (b *recordingBank) accountFor(ref string) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.accounts[ref]
 }
 
 func runWorker(t *testing.T, orgID, payrollID string) {

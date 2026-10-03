@@ -360,20 +360,25 @@ docker-compose logs -f scheduler
 | `POST` | `/api/v1/auth/refresh` | Refresh an employer token — only while the org is active, max 24h from login |
 | `POST` | `/api/v1/worker/auth/otp` | Send a worker a 6-digit login code by SMS (503 until an SMS provider is wired) |
 | `POST` | `/api/v1/worker/auth/login` | Worker login — phone + OTP; codes are single-use, 5 min, 5 guesses |
+| `GET` | `/api/v1/worker/payslips` | The worker's own payroll lines, newest first: period, gross, advances recovered, savings, net, and whether the money has landed |
 
 **Employees**
 
 | Method | Path | Description |
 |:---|:---|:---|
 | `POST` | `/api/v1/employees/` | Create employee — BVN verified, consent recorded, PII encrypted; optional `phone` (E.164) creates the worker's app login |
-| `GET` | `/api/v1/employees/` | List employees (paginated) |
+| `GET` | `/api/v1/employees/` | List employees (paginated; bank details masked) |
+| `PATCH` | `/api/v1/employees/:id` | Admin: change name, email, phone (the worker's login), bank details, salary or hourly rate. Unknown fields are refused; changes are audited with PII masked; a corrected account applies to the next payment, including a retry |
 
 **Payroll**
 
 | Method | Path | Description |
 |:---|:---|:---|
 | `POST` | `/api/v1/payrolls/` | Initiate batch — idempotent, queued async |
-| `GET` | `/api/v1/payrolls/:id` | Batch status and all disbursement items |
+| `GET` | `/api/v1/payrolls/` | Payroll history, newest first, paginated, with each batch's outcome |
+| `GET` | `/api/v1/payrolls/:id` | Batch status, all payment lines, and `summary` (`outcome`: `paid` / `partially_paid` / `in_progress` / `failed`, counts, amounts, `stuck`) |
+| `POST` | `/api/v1/payrolls/:id/retry` | Admin: resend only the failed lines of a failed batch, as a new attempt under a new bank reference. Paid lines are never re-sent |
+| `POST` | `/api/v1/payrolls/:id/items/:item_id/resolve` | Admin: settle a payment whose bank callback is overdue (`PAYROLL_STUCK_AFTER`, default 2h). Reason required; marking one `failed` also needs evidence, because a retry of a payment that actually succeeded pays twice |
 
 **Analytics & Compliance**
 

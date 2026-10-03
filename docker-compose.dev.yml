@@ -1,0 +1,6 @@
+# Local development override: publish the API directly (no TLS), e.g.
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+services:
+  api:
+    ports:
+      - "127.0.0.1:28080:8080"

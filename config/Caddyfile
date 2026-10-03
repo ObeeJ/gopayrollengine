@@ -1,0 +1,13 @@
+# TLS front door for the API. See docker-compose.yml (service "caddy").
+{$PUBLIC_HOST:localhost} {
+	encode zstd gzip
+
+	# /metrics carries per-tenant series and is scraped over the internal
+	# network only; it must never be reachable through the public listener.
+	@metrics path /metrics /metrics/*
+	respond @metrics 404
+
+	# Caddy sets X-Forwarded-For/-Proto itself and overwrites any value the
+	# client sent, which is what the API's TRUSTED_PROXIES setting relies on.
+	reverse_proxy api:8080
+}

@@ -262,15 +262,19 @@ Default region `ng` — zero breaking changes for existing orgs.
 Start the full observability stack:
 
 ```bash
-docker-compose up
+docker compose up
 ```
+
+The API is not published to the host. Caddy terminates TLS on 80/443 for `PUBLIC_HOST` (default `localhost`, with a locally issued certificate) and forwards to it; set `PUBLIC_HOST` to your DNS name for a real certificate. For local development without TLS, add the override: `docker compose -f docker-compose.yml -f docker-compose.dev.yml up`.
+
+`/metrics` needs `Authorization: Bearer $METRICS_TOKEN` (Prometheus is configured with it), is never forwarded by Caddy, and answers 404 outside development if `METRICS_TOKEN` is unset. Grafana, Prometheus, the exporters, Postgres and Redis listen on `127.0.0.1` only.
 
 | Service | URL |
 |:---|:---|
-| API | http://localhost:28080 |
+| API (TLS) | https://localhost |
+| API (dev override) | http://localhost:28080 |
 | Grafana | http://localhost:3000 |
 | Prometheus | http://localhost:9090 |
-| Metrics | http://localhost:28080/metrics |
 
 <br />
 

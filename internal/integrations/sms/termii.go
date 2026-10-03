@@ -59,15 +59,6 @@ func FromEnv() (*Client, error) {
 	return New(key, sender, os.Getenv("TERMII_BASE_URL")), nil
 }
 
-type sendRequest struct {
-	To      string `json:"to"`
-	From    string `json:"from"`
-	SMS     string `json:"sms"`
-	Type    string `json:"type"`
-	Channel string `json:"channel"`
-	APIKey  string `json:"api_key"`
-}
-
 type sendResponse struct {
 	Code      string `json:"code"`
 	MessageID string `json:"message_id"`
@@ -77,13 +68,16 @@ type sendResponse struct {
 // SendText delivers text to an E.164 phone number ("+2348012345678"). The
 // returned error never contains the message body or the API key.
 func (c *Client) SendText(ctx context.Context, phone, text string) error {
-	body, err := json.Marshal(sendRequest{
-		To:      strings.TrimPrefix(phone, "+"), // the gateway wants digits only
-		From:    c.senderID,
-		SMS:     text,
-		Type:    "plain",
-		Channel: "generic",
-		APIKey:  c.apiKey,
+	// The gateway's protocol carries the key in the JSON body. A map, not a
+	// struct with an APIKey field, so a secret-named field is never marshaled
+	// by a type that could be logged or reused elsewhere.
+	body, err := json.Marshal(map[string]string{
+		"to":      strings.TrimPrefix(phone, "+"), // the gateway wants digits only
+		"from":    c.senderID,
+		"sms":     text,
+		"type":    "plain",
+		"channel": "generic",
+		"api_key": c.apiKey,
 	})
 	if err != nil {
 		return fmt.Errorf("sms: encode request: %w", err)

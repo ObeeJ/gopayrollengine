@@ -11,6 +11,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// sendRequest is the wire body as the gateway receives it (decode only).
+type sendRequest struct {
+	To      string `json:"to"`
+	From    string `json:"from"`
+	SMS     string `json:"sms"`
+	Type    string `json:"type"`
+	Channel string `json:"channel"`
+	APIKey  string `json:"api_key"`
+}
+
 func fakeGateway(t *testing.T, status int, reply string, got *sendRequest) *Client {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

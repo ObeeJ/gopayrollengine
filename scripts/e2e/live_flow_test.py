@@ -198,6 +198,7 @@ class Ctx:
         self.report = Report()
         self.monnify_secret = os.environ.get("MONNIFY_SECRET_KEY", "")
         self.jwt_secret = os.environ.get("JWT_SECRET", "")
+        self.metrics_token = os.environ.get("METRICS_TOKEN", "")
         self.state = {}
 
     def actor(self, persona, name, ip):
@@ -470,11 +471,11 @@ def phase_ops_probes(ctx):
     if r.json:
         ops.check("readiness reports every dependency as ok",
                   all(v == "ok" for v in (r.get("checks") or {}).values()), short(r.text))
-    m = ops.call("GET", "/metrics", token=None, expect=200, label="Prometheus can scrape /metrics")
-    if m.status == 200:
-        ops.observe("/metrics is reachable with no credentials",
-                    "Anyone who can reach the API can read every Prometheus series. Firewall it or put it "
-                    "behind auth before launch (see the tenant-ID check at the end of this run).", "high")
+    ops.call("GET", "/metrics", token=None, expect=401, label="/metrics refuses an unauthenticated caller")
+    ops.call("GET", "/metrics", token=None, headers={"Authorization": "Bearer not-the-token"}, expect=401,
+             label="/metrics refuses a wrong scrape token")
+    ops.call("GET", "/metrics", token=None, headers={"Authorization": "Bearer " + ctx.metrics_token}, expect=200,
+             label="Prometheus can scrape /metrics with its token")
 
 
 def phase_operator(ctx):
@@ -1292,12 +1293,12 @@ def phase_jobs(ctx):
 
 def phase_metrics_leak(ctx):
     ops = ctx.actor("ops", "Ops on-call", "10.0.0.2")
-    m = ops.call("GET", "/metrics", token=None, expect=200, label="scrapes metrics after a day of traffic")
-    leaked = [o for o in (ctx.state.get("swift"), ctx.state.get("kano")) if o and o in m.text]
-    if leaked:
-        ops.observe("Public /metrics exposes tenant IDs",
-                    f"Org IDs {', '.join(leaked)} appear in metric labels (e.g. webhook amount mismatches), readable "
-                    "by anyone who can reach /metrics.", "high")
+    anon = ops.call("GET", "/metrics", token=None, expect=401, label="an anonymous caller cannot read metrics")
+    leaked = [o for o in (ctx.state.get("swift"), ctx.state.get("kano")) if o and o in anon.text]
+    ops.check("an anonymous caller learns no tenant IDs from /metrics", not leaked, ", ".join(leaked))
+    m = ops.call("GET", "/metrics", token=None, headers={"Authorization": "Bearer " + ctx.metrics_token},
+                 expect=200, label="the scraper still sees per-tenant series after a day of traffic")
+    ops.check("per-tenant series exist for the scraper", ctx.state.get("swift", "") in m.text or "org_id" in m.text)
 
 
 # ════════════════════════════════════════════════════════════════════════════

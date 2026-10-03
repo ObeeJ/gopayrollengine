@@ -3,6 +3,7 @@ package api
 import (
 	"go-payroll-engine/internal/api/handlers"
 	"go-payroll-engine/internal/api/middleware"
+	"go-payroll-engine/internal/appenv"
 	"go-payroll-engine/internal/integrations/banklink"
 	"go-payroll-engine/internal/integrations/monnify"
 	"go-payroll-engine/internal/models"
@@ -30,7 +31,10 @@ func SetupRouter() *gin.Engine {
 	r.Use(middleware.RateLimit())
 	r.Use(gin.Recovery())
 
-	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	// Per-tenant series: bearer-token gated. Unset outside development means
+	// closed (404), never open.
+	r.GET("/metrics", middleware.MetricsAuth(os.Getenv("METRICS_TOKEN"), appenv.AllowsInsecureDefaults()),
+		gin.WrapH(promhttp.Handler()))
 
 	healthHandler := &handlers.HealthHandler{DB: models.DB, RDB: workers.RDB}
 	r.GET("/healthz", healthHandler.Liveness)

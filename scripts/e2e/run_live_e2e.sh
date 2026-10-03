@@ -109,6 +109,7 @@ rand_b64() { python3 -c 'import os,base64; print(base64.b64encode(os.urandom(32)
 export APP_ENV=development
 export MOCK_MODE=true
 export APP_API_KEY="e2e-api-key"
+export METRICS_TOKEN="e2e-metrics-$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
 export JWT_SECRET="${E2E_JWT_SECRET:-e2e-jwt-secret-$(rand_b64)}"
 export ENCRYPTION_KEK="$(rand_b64)"
 export ENCRYPTION_HMAC_KEY="$(rand_b64)"

@@ -11,6 +11,8 @@
 #   POSTGRES_APP_PASSWORD     — payroll_app role password (NOSUPERUSER + RLS).
 #   REDIS_PASSWORD            — Redis AUTH password.
 #   GRAFANA_PASSWORD          — Grafana admin password.
+#   METRICS_TOKEN             — bearer token Prometheus presents to /metrics.
+#   PUBLIC_HOST (optional)    — DNS name Caddy serves HTTPS for (default localhost).
 #   APP_API_KEY, JWT_SECRET, ENCRYPTION_KEK, ENCRYPTION_HMAC_KEY,
 #   MONNIFY_*                 — see .env.example.
 #
@@ -30,7 +32,7 @@ services:
       # Postgres entrypoint exports every POSTGRES_* var into the initdb env.
       POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD must be set}
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       # Runs once on a fresh data directory — provisions payroll_app role.
@@ -54,7 +56,7 @@ services:
       - --protected-mode
       - "yes"
     ports:
-      - "6380:6379"
+      - "127.0.0.1:6380:6379"
     healthcheck:
       test:
         - "CMD"
@@ -94,16 +96,42 @@ services:
       - REDIS_URL=redis:6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
       - MIGRATIONS_PATH=file:///internal/db/migrations
-    ports:
-      # 28080 on the host — picked to avoid clashes with the common dev
-      # defaults (8080, 8000, 3000). Container still listens on 8080 inside.
-      - "28080:8080"
+      # The proxy is the only peer; trust its forwarded client IP (docker's
+      # default bridge ranges). Without this every request would rate-limit
+      # as one client.
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-172.16.0.0/12}
+      - METRICS_TOKEN=${METRICS_TOKEN:?METRICS_TOKEN must be set}
+    # Not published to the host: the only way in from outside is the TLS proxy
+    # below. For local development publish it with
+    #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+    expose:
+      - "8080"
     restart: unless-stopped
     # Distroless image has no shell — no in-image healthcheck binary. The
     # /healthz endpoint is the contract; rely on the orchestrator (k8s
     # liveness/readiness probes, ECS health checks, load-balancer probes)
     # to call it. Compose itself cannot HTTP-probe without shipping curl,
     # which would defeat the point of the distroless base.
+
+  # TLS termination. Caddy obtains and renews a certificate for PUBLIC_HOST
+  # automatically (a public DNS name pointing at this host, ports 80/443
+  # reachable); for `localhost` it issues from its own internal CA. /metrics is
+  # never forwarded: Prometheus scrapes the API over the internal network.
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: payroll_caddy
+    depends_on:
+      - api
+    environment:
+      - PUBLIC_HOST=${PUBLIC_HOST:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
 
   worker:
     build:
@@ -169,6 +197,8 @@ services:
   prometheus:
     image: prom/prometheus:v2.53.0
     container_name: payroll_prometheus
+    secrets:
+      - metrics_token
     volumes:
       - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
@@ -176,7 +206,7 @@ services:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.retention.time=30d"  # 30 days of metrics for SOC 2 evidence
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     restart: unless-stopped
 
   grafana:
@@ -194,7 +224,7 @@ services:
       - grafana_data:/var/lib/grafana
       - ./config/grafana-dashboard.json:/etc/grafana/provisioning/dashboards/payroll.json:ro
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     restart: unless-stopped
 
   # Redis exporter — exposes Redis metrics to Prometheus. Authenticated.
@@ -205,7 +235,7 @@ services:
       - REDIS_ADDR=redis://redis:6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
     ports:
-      - "9121:9121"
+      - "127.0.0.1:9121:9121"
     depends_on:
       - redis
     restart: unless-stopped
@@ -217,13 +247,21 @@ services:
     environment:
       - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-payroll_db}?sslmode=disable
     ports:
-      - "9187:9187"
+      - "127.0.0.1:9187:9187"
     depends_on:
       db:
         condition: service_healthy
     restart: unless-stopped
 
+# The scrape credential for /metrics, taken from the environment (compose
+# mounts it as a file Prometheus reads via credentials_file).
+secrets:
+  metrics_token:
+    environment: METRICS_TOKEN
+
 volumes:
   postgres_data:
   prometheus_data:
   grafana_data:
+  caddy_data:
+  caddy_config:

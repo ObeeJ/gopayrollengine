@@ -119,6 +119,8 @@ export MIGRATIONS_PATH="file://internal/db/migrations"
 export REDIS_URL="localhost:${REDIS_PORT}"
 export REDIS_PASSWORD=""
 export TRUSTED_PROXIES="127.0.0.1"
+# Real default is 2h; the stuck-payout flow can't wait that long.
+export PAYROLL_STUCK_AFTER="${E2E_STUCK_AFTER:-5s}"
 export DATA_REGIONS="ng"
 export PORT="$API_PORT"
 
@@ -145,6 +147,7 @@ python3 "$REPO_ROOT/scripts/e2e/live_flow_test.py" \
   --api-log "$E2E_OUT/api.log" \
   --operator-dsn "$MIGRATION_DATABASE_URL" \
   --binary "$E2E_OUT/payroll" \
+  --stuck-after "${PAYROLL_STUCK_AFTER%s}" \
   --out "$E2E_OUT" "$@"
 status=$?
 set -e

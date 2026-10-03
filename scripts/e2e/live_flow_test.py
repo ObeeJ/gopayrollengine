@@ -812,22 +812,19 @@ def phase_payroll(ctx, monnify):
               statuses.get(S["musa_id"]) == "completed" and statuses.get(S["chioma_id"]) == "completed"
               and statuses.get(S["emeka_id"]) == "failed", short(r.text))
     ada.check("batch is closed (no items left pending)", r.get("pending_count") == 0, short(r.text))
-    if r.get("status") == "failed":
-        ada.observe("One failed payout marks the whole batch 'failed'",
-                    "Two of three people were paid, but the batch reads 'failed', and the one-run-per-month rule "
-                    "(409 above) leaves no way to re-pay Emeka once his account is fixed. Needs a 'partially "
-                    "completed' state and a retry-failed-items action.", "high")
+    ada.check("the batch reads as partially paid, not as if nobody was paid",
+              r.get("summary", "outcome") == "partially_paid"
+              and r.get("summary", "paid_items") == 2 and r.get("summary", "failed_items") == 1, short(r.text))
 
-    # What Ada tries next: fix Emeka's closed account and pay him.
+    # What Ada does next: Emeka's account was closed; he is paid through a retry.
     if emeka_item:
-        probe_missing(ada, "PATCH", f"/api/v1/employees/{S['emeka_id']}", "updating an employee",
-                      "Emeka's account was closed, but there is no way to change his bank details — or anyone's "
-                      "salary or phone — after hiring.", "high", body={"account_number": rand_nuban()})
-        probe_missing(ada, "POST", f"/api/v1/payrolls/{pid}/retry", "retrying failed payslip lines",
-                      "With the month's run already used (409 above), Emeka cannot be paid through the system.",
-                      "high")
-    probe_missing(ada, "GET", "/api/v1/payrolls/?page=1", "a payroll history list",
-                  "Payrolls can only be fetched by ID; an admin has no way to list past runs.")
+        retry_failed_payment(ada, monnify, pid, emeka_item)
+
+    r = ada.call("GET", "/api/v1/payrolls/?page=1&page_size=10", route="/api/v1/payrolls/", expect=200,
+                 label="opens the payroll history")
+    ada.check("history lists this month's run, paid in full after the retry",
+              r.get("total") == 1 and (r.get("data") or [{}])[0].get("id") == pid
+              and (r.get("data") or [{}])[0].get("summary", {}).get("outcome") == "paid", short(r.text))
 
     musa = S.get("musa")
     if musa:
@@ -837,6 +834,38 @@ def phase_payroll(ctx, monnify):
         lr = musa.call("GET", "/api/v1/worker/advances", expect=200, label="checks his advance after payday")
         a = find(lr.get("data"), id=S["musa_advance_id"])
         musa.check("advance is settled by payroll", a and a.get("status") == "settled", short(lr.text))
+
+
+def retry_failed_payment(ada, monnify, pid, emeka_item):
+    route = "/api/v1/payrolls/:id/retry"
+    path = f"/api/v1/payrolls/{pid}/retry"
+    ada.call("POST", path, route=route, expect=400, label="retrying without an Idempotency-Key is refused")
+    r = ada.call("POST", path, route=route, idem=True, expect=202, label="retries Emeka's failed payment")
+    ada.check("exactly one line is retried, none skipped", r.get("retrying") == 1 and r.get("skipped") == [],
+              short(r.text))
+
+    def resent():
+        p = ada.call("GET", f"/api/v1/payrolls/{pid}", route="/api/v1/payrolls/:id")
+        it = find(p.get("items"), id=emeka_item["id"])
+        return it if it and it.get("status") == "processing" and it.get("attempt") == 2 else None
+    ada.check("the worker sent it again as a second attempt", bool(wait_until(resent, 15)),
+              "Emeka's line never reached processing at attempt 2")
+
+    ada.call("POST", path, route=route, idem=True, expect=409, label="a batch that is processing cannot be retried")
+    monnify.disbursement("DISBURSEMENT_FAILED", emeka_item["id"], emeka_item["amount"],
+                         "a late 'failed' from the FIRST attempt is acknowledged but ignored")
+    p = ada.call("GET", f"/api/v1/payrolls/{pid}", route="/api/v1/payrolls/:id", expect=200,
+                 label="checks that the retry is still in flight")
+    ada.check("Emeka's retry is untouched by the stale callback",
+              (find(p.get("items"), id=emeka_item["id"]) or {}).get("status") == "processing", short(p.text))
+
+    monnify.disbursement("DISBURSEMENT_SUCCESSFUL", emeka_item["id"] + "-R2", emeka_item["amount"],
+                         "Emeka's retried payment lands (second-attempt reference)")
+    p = ada.call("GET", f"/api/v1/payrolls/{pid}", route="/api/v1/payrolls/:id", expect=200,
+                 label="checks the batch after the retry")
+    ada.check("every line is paid and the batch is closed",
+              p.get("status") == "completed" and p.get("summary", "outcome") == "paid", short(p.text))
+    ada.call("POST", path, route=route, idem=True, expect=409, label="a fully paid batch cannot be retried")
 
 
 def phase_reporting(ctx):
@@ -943,6 +972,64 @@ def phase_d2c(ctx):
     worker_login(ctx, bayo2, S["bayo_phone"])
 
 
+def stuck_payout_flow(ctx, sani):
+    """Kano runs payroll and Monnify's callbacks never arrive."""
+    period = date.today().strftime("%Y-%m")
+    r = sani.call("POST", "/api/v1/payrolls/", body={"period": period}, idem=True, expect=202,
+                  label="runs payroll; the bank never calls back")
+    require(r.status == 202 and r.get("id"), "Kano payroll not accepted")
+    pid = r.get("id")
+    route = "/api/v1/payrolls/:id"
+
+    def processing():
+        p = sani.call("GET", f"/api/v1/payrolls/{pid}", route=route)
+        return p if p.get("status") == "processing" else None
+    p = wait_until(processing, 20)
+    require(p, "Kano payroll never reached processing")
+    items = p.get("items") or []
+    item_path = lambda it: f"/api/v1/payrolls/{pid}/items/{it['id']}/resolve"  # noqa: E731
+    rroute = "/api/v1/payrolls/:id/items/:item_id/resolve"
+
+    sani.call("POST", item_path(items[0]), route=rroute, idem=True, expect=409,
+              body={"outcome": "paid", "note": "I think it went through"},
+              label="cannot mark a payment paid before its callback is overdue")
+    sani.check("nothing is flagged as stuck yet", p.get("summary", "stuck") is False, short(p.text))
+
+    time.sleep(ctx.args.stuck_after + 1)
+    p = sani.call("GET", f"/api/v1/payrolls/{pid}", route=route, expect=200, label="checks the payroll later")
+    sani.check("the overdue callbacks are flagged on the payroll", p.get("summary", "stuck") is True, short(p.text))
+
+    sani.call("POST", item_path(items[0]), route=rroute, idem=True, expect=400, body={"outcome": "paid"},
+              label="resolving without a reason is refused")
+    sani.call("POST", item_path(items[0]), route=rroute, idem=True, expect=400,
+              body={"outcome": "maybe", "note": "unsure"}, label="an outcome other than paid/failed is refused")
+    sani.call("POST", item_path(items[0]), route=rroute, idem=True, expect=400,
+              body={"outcome": "failed", "note": "it probably failed"},
+              label="marking a payment failed without evidence is refused (a retry could pay twice)")
+    swift_item = find(((ctx.state.get("ada").call("GET", f"/api/v1/payrolls/{ctx.state['payroll_id']}",
+                                                  route=route).get("items")) or []))
+    if swift_item:
+        sani.call("POST", f"/api/v1/payrolls/{ctx.state['payroll_id']}/items/{swift_item['id']}/resolve",
+                  route=rroute, idem=True, expect=404, body={"outcome": "paid", "note": "hostile attempt"},
+                  label="cannot resolve another employer's payment")
+
+    for n, it in enumerate(items):
+        r = sani.call("POST", item_path(it), route=rroute, idem=True, expect=200,
+                      body={"outcome": "paid", "note": "confirmed settled on the Monnify dashboard",
+                            "evidence": f"MNFY-DASH-{n}"},
+                      label=f"resolves {it['employee_name']}'s payment as paid, with evidence")
+        sani.check("the attestation is recorded on the payment",
+                   r.get("resolution_evidence") == f"MNFY-DASH-{n}" and r.get("status") == "completed", short(r.text))
+    p = sani.call("GET", f"/api/v1/payrolls/{pid}", route=route, expect=200, label="checks the payroll after resolving")
+    sani.check("resolving the last payment closes the batch as paid",
+               p.get("status") == "completed" and p.get("summary", "outcome") == "paid", short(p.text))
+    Monnify(ctx, "monnify", "Monnify", "41.58.0.10").disbursement(
+        "DISBURSEMENT_FAILED", items[0]["id"], items[0]["amount"],
+        "the callback finally turns up, contradicting the attestation, and is ignored")
+    p = sani.call("GET", f"/api/v1/payrolls/{pid}", route=route, expect=200, label="re-checks the payroll")
+    sani.check("a late callback cannot undo a resolved payment", p.get("status") == "completed", short(p.text))
+
+
 def phase_second_tenant(ctx):
     S = ctx.state
     sani = ctx.actor("employer", "Sani (HR admin, Kano Textiles)", "41.190.2.3")
@@ -956,6 +1043,8 @@ def phase_second_tenant(ctx):
     S["hauwa_id"] = r.get("id")
     sani.call("POST", "/api/v1/employees/", idem=True, expect=201, label="adds Ibrahim",
               body=employee_body("Ibrahim Musa", salary=120_000_00, phone=S["ibrahim_phone"]))
+
+    stuck_payout_flow(ctx, sani)
 
     hauwa = ctx.actor("worker", "Hauwa (Kano Textiles)", "105.112.9.9")
     worker_login(ctx, hauwa, S["hauwa_phone"])
@@ -1201,6 +1290,8 @@ def main():
     ap.add_argument("--binary", help="payroll binary, to run the scheduled jobs")
     ap.add_argument("--out", default=".", help="where report.md / report.json go")
     ap.add_argument("--seed", type=int, default=None, help="random seed for reproducible phones/accounts")
+    ap.add_argument("--stuck-after", type=float, default=5.0,
+                    help="seconds the API's PAYROLL_STUCK_AFTER is set to (run_live_e2e.sh sets 5s)")
     args = ap.parse_args()
     random.seed(args.seed)
 

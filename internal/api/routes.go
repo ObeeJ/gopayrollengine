@@ -137,7 +137,10 @@ func SetupRouter() *gin.Engine {
 			payrolls := employer.Group("/payrolls")
 			{
 				payrolls.POST("/", middleware.RequireRole("admin"), middleware.Idempotency(workers.RDB), payrollHandler.CreatePayroll)
+				payrolls.GET("/", payrollHandler.ListPayrolls)
 				payrolls.GET("/:id", payrollHandler.GetPayroll)
+				payrolls.POST("/:id/retry", middleware.RequireRole("admin"), middleware.Idempotency(workers.RDB), payrollHandler.RetryPayroll)
+				payrolls.POST("/:id/items/:item_id/resolve", middleware.RequireRole("admin"), middleware.Idempotency(workers.RDB), payrollHandler.ResolvePayrollItem)
 			}
 
 			analytics := employer.Group("/analytics")

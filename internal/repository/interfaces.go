@@ -28,6 +28,13 @@ type PayrollRepository interface {
 	DecrementPendingCount(payrollID string) (int, error)
 	UpdateItemStatus(item *models.PayrollItem, next models.PayrollStatus) error
 	FindItemByRef(ref string) (*models.PayrollItem, error)
+	// ListPaginated returns the org's batches newest first, with the total count.
+	ListPaginated(orgID string, page, pageSize int) ([]models.Payroll, int64, error)
+	// ItemsForPayrolls loads the items of several batches in ONE query, so a
+	// list of N batches is two round trips, not N+1.
+	ItemsForPayrolls(orgID string, payrollIDs []string) ([]models.PayrollItem, error)
+	FindItem(orgID, payrollID, itemID string) (*models.PayrollItem, error)
+	FindItemsByStatus(orgID, payrollID string, status models.PayrollStatus) ([]models.PayrollItem, error)
 }
 
 // OrganizationRepository — the clerk who handles org identity and credentials.

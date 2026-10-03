@@ -6,10 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"go-payroll-engine/internal/api/middleware"
 	"go-payroll-engine/internal/models"
 	"go-payroll-engine/internal/observability"
+	"go-payroll-engine/internal/services"
 	"go-payroll-engine/pkg/money"
 	"io"
 	"net/http"
@@ -133,12 +133,30 @@ func (h *WebhookHandler) HandleMonnifyWebhook(c *gin.Context) {
 // handlePayrollItemWebhook processes a disbursement callback for one payroll
 // batch item.
 func (h *WebhookHandler) handlePayrollItemWebhook(c *gin.Context, payload MonnifyWebhookPayload, ref string) {
+	// A retry is sent under "<item id>-R<attempt>" (models.PayrollItem.ItemReference).
+	itemID, attempt, ok := models.ParseItemReference(ref)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Item not found"})
+		return
+	}
+
 	// SECURITY DEFINER lookup (migration 000011) — we don't know the orgID yet, HMAC already vouched for the ref.
 	var item models.PayrollItem
 	if err := models.DB.Raw(
-		"SELECT * FROM lookup_payroll_item_for_webhook(?)", ref,
+		"SELECT * FROM lookup_payroll_item_for_webhook(?)", itemID,
 	).Scan(&item).Error; err != nil || item.ID == "" {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Item not found"})
+		return
+	}
+
+	// A callback for a superseded attempt says nothing about the current one:
+	// attempt 1's late "failed" must not fail attempt 2's in-flight payout, and
+	// attempt 1's late "paid" must not close an item whose retry is still moving
+	// money. Acknowledge it (so the provider stops retrying) and change nothing.
+	if attempt != item.Attempt {
+		middleware.Logger.Warn("callback for a superseded payout attempt ignored",
+			"item_id", item.ID, "callback_attempt", attempt, "current_attempt", item.Attempt)
+		c.Status(http.StatusOK)
 		return
 	}
 
@@ -203,52 +221,12 @@ func (h *WebhookHandler) handlePayrollItemWebhook(c *gin.Context, payload Monnif
 
 	// One RLS-scoped tx for transition + decrement + audit; orgID came from the just-loaded item.
 	orgID := item.OrganizationID
-	prevStatus := item.Status
-
 	if err := models.WithOrgScope(c.Request.Context(), orgID, func(tx *gorm.DB) error {
-		// Step 5 (write): CAS status transition on the item.
-		if err := models.TransitionStatus(tx, &item, item.Status, newStatus); err != nil {
-			if errors.Is(err, models.ErrStaleStatus) {
-				// Concurrent webhook for the same ref already won; treat as success.
-				return nil
-			}
-			return fmt.Errorf("item status update failed: %w", err)
-		}
-
-		// UPDATE...RETURNING: exactly one webhook sees pending_count=0, no TOCTOU.
-		var post struct {
-			PendingCount int                  `gorm:"column:pending_count"`
-			Status       models.PayrollStatus `gorm:"column:status"`
-		}
-		// The pending_count > 0 guard keeps the counter from going negative if a
-		// stray webhook ever slips past the guards above; without it the counter
-		// could re-cross zero and reconcile the same batch twice.
-		res := tx.Raw(
-			`UPDATE payrolls
-			    SET pending_count = pending_count - 1,
-			        updated_at    = NOW()
-			  WHERE id = ?
-			    AND pending_count > 0
-			RETURNING pending_count, status`,
-			item.PayrollID,
-		).Scan(&post)
-		if res.Error != nil {
-			return fmt.Errorf("atomic pending_count decrement failed: %w", res.Error)
-		}
-		// No row updated means the counter was already zero — the batch has been
-		// reconciled by another webhook. The item transition above still stands.
-		if res.RowsAffected > 0 && post.PendingCount == 0 {
-			if err := reconcilePayrollStatus(tx, orgID, models.Payroll{
-				ID:     item.PayrollID,
-				Status: post.Status,
-			}); err != nil {
-				return err
-			}
-		}
-
-		// Audit inside the same tx — failure rolls everything back and Monnify will retry.
-		return models.AppendAuditTx(tx, orgID, "PayrollItem", item.ID, "status_change",
-			string(prevStatus), string(newStatus), c.ClientIP(), "")
+		// Shared with the admin's manual resolution (services.SettlePayrollItem):
+		// the item CAS, the pending counter, batch reconciliation and the audit
+		// row all commit together, so a failure rolls back and Monnify retries.
+		_, err := services.SettlePayrollItem(tx, orgID, &item, newStatus, services.SettlementSource{IP: c.ClientIP()})
+		return err
 	}); err != nil {
 		middleware.Logger.Error("webhook transaction failed",
 			"item_id", item.ID, "error", err.Error())
@@ -486,45 +464,4 @@ func (h *WebhookHandler) handleFundingWebhook(c *gin.Context, body []byte) {
 	}
 
 	c.Status(http.StatusOK)
-}
-
-// reconcilePayrollStatus — called once per batch when pending_count hits zero; CAS UPDATE makes races a no-op.
-//
-// Every failure is returned so the caller's transaction rolls back and
-// Monnify redelivers. A failed item count used to be ignored, which read as
-// zero failures and closed the batch as completed even when some employees'
-// transfers had failed.
-func reconcilePayrollStatus(tx *gorm.DB, orgID string, payroll models.Payroll) error {
-	var failedCount int64
-	if err := tx.Model(&models.PayrollItem{}).
-		Where("payroll_id = ? AND status = ?", payroll.ID, models.PayrollFailed).
-		Count(&failedCount).Error; err != nil {
-		return fmt.Errorf("counting failed items for payroll %s: %w", payroll.ID, err)
-	}
-
-	newStatus := models.PayrollCompleted
-	if failedCount > 0 {
-		newStatus = models.PayrollFailed
-	}
-
-	// FSM CAS: processing → completed/failed; stale status means someone beat us, also fine.
-	if err := models.TransitionStatus(tx, &payroll, payroll.Status, newStatus); err != nil {
-		if errors.Is(err, models.ErrStaleStatus) {
-			return nil
-		}
-		return fmt.Errorf("payroll %s reconciliation: %w", payroll.ID, err)
-	}
-
-	// Audit the batch-level resolution inside the same tx.
-	if err := models.AppendAuditTx(tx, orgID, "Payroll", payroll.ID, "reconciled",
-		string(payroll.Status), string(newStatus), "internal", ""); err != nil {
-		return fmt.Errorf("payroll %s reconciliation audit: %w", payroll.ID, err)
-	}
-
-	middleware.Logger.Info("payroll reconciled",
-		"payroll_id", payroll.ID,
-		"status", newStatus,
-		"failed_items", fmt.Sprintf("%d", failedCount),
-	)
-	return nil
 }

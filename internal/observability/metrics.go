@@ -161,4 +161,12 @@ var (
 		Name: "payroll_reconciliation_alerts_total",
 		Help: "Reconciliation runs where drift exceeded the alert threshold.",
 	})
+
+	// PayrollItemsStuck — payments handed to the bank whose result is overdue
+	// (models.StuckAfter). Non-zero means a lost callback or a worker that died
+	// mid-hand-off: someone has to check the provider and resolve them.
+	PayrollItemsStuck = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "payroll_items_stuck",
+		Help: "Payroll payments awaiting the bank's result for longer than PAYROLL_STUCK_AFTER.",
+	})
 )

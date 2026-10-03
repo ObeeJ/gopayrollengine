@@ -191,7 +191,13 @@ func (s *PayrollService) CreatePayroll(ctx context.Context, orgID, period string
 				}
 			}
 
-			updates := map[string]interface{}{}
+			// The breakdown behind the net, kept on the item so a payslip can
+			// show it without reverse-engineering it (migration 000034).
+			updates := map[string]interface{}{
+				"gross_kobo":             gross,
+				"advances_deducted_kobo": withheld,
+				"savings_kobo":           diverted,
+			}
 			if withheld.IsPositive() || diverted.IsPositive() {
 				updates["amount"] = net
 			}

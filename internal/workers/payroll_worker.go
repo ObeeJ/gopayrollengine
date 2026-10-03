@@ -109,6 +109,33 @@ func (h *PayrollHandler) ProcessPayrollTask(ctx context.Context, t *asynq.Task) 
 		payroll.Status = models.PayrollProcessing
 		payroll.PendingCount = len(sendable)
 
+		// The items go to 'processing' in this same transaction, before the
+		// bank is called. A callback can only settle an item that is
+		// processing (pending → completed is not an FSM edge), and the
+		// callback may arrive the instant Monnify accepts the batch. This
+		// write used to be missing: items stayed 'pending' forever, every
+		// "paid" callback was an illegal transition that was logged and
+		// answered 200 (so Monnify stopped retrying), and no batch ever
+		// completed. See TestPayroll_AllCallbacksSuccessful_BatchCompletes.
+		if len(sendable) > 0 {
+			sendableIDs := make([]string, 0, len(sendable))
+			for _, item := range sendable {
+				sendableIDs = append(sendableIDs, item.ID)
+			}
+			marked := tx.Model(&models.PayrollItem{}).
+				Where("id IN ? AND status = ?", sendableIDs, models.PayrollPending).
+				Update("status", models.PayrollProcessing)
+			if marked.Error != nil {
+				return fmt.Errorf("payroll %s: marking items processing failed: %w", payrollID, marked.Error)
+			}
+			if marked.RowsAffected != int64(len(sendable)) {
+				// Items changed under us after we read them. Sending now would
+				// pay an item some other writer already owns.
+				return fmt.Errorf("payroll %s: %d of %d items were no longer pending: %w",
+					payrollID, int64(len(sendable))-marked.RowsAffected, len(sendable), models.ErrStaleStatus)
+			}
+		}
+
 		if len(orphaned) > 0 {
 			log.Printf("payroll %s: %d item(s) have no employee record — failing them", payrollID, len(orphaned))
 			if err := tx.Model(&models.PayrollItem{}).
@@ -197,17 +224,13 @@ func (h *PayrollHandler) ProcessPayrollTask(ctx context.Context, t *asynq.Task) 
 		// Definitely not accepted (e.g. auth failed before sending), so a
 		// bounded retry is safe. Phase-1 tx is committed; open a fresh RLS
 		// scope to mark failed.
-		if scopeErr := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
-			return models.TransitionStatus(tx, &payroll, models.PayrollProcessing, models.PayrollFailed)
-		}); scopeErr != nil {
+		if scopeErr := failBatchBeforeSend(ctx, orgID, &payroll); scopeErr != nil {
 			log.Printf("payroll %s: failed to mark as failed after Monnify error: %v", payrollID, scopeErr)
 		}
 		return err
 	}
 	if !resp.RequestSuccessful {
-		if scopeErr := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
-			return models.TransitionStatus(tx, &payroll, models.PayrollProcessing, models.PayrollFailed)
-		}); scopeErr != nil {
+		if scopeErr := failBatchBeforeSend(ctx, orgID, &payroll); scopeErr != nil {
 			log.Printf("payroll %s: failed to mark as failed after Monnify rejection: %v", payrollID, scopeErr)
 		}
 		return fmt.Errorf("monnify said no: %s", resp.ResponseMessage)
@@ -219,6 +242,22 @@ func (h *PayrollHandler) ProcessPayrollTask(ctx context.Context, t *asynq.Task) 
 	observability.PayrollsCreatedTotal.WithLabelValues(orgID, "processing").Inc()
 	log.Printf("Payroll %s handed to Monnify — %d webhooks incoming", payrollID, len(sendable))
 	return nil
+}
+
+// failBatchBeforeSend handles a batch the bank definitively did not accept.
+// Nothing was sent, so the items go back to 'pending' together with the batch
+// moving to 'failed': the asynq retry re-enters through failed → processing and
+// submits only 'pending' items. Leaving them 'processing' would make that retry
+// skip every one of them as already sent, stranding the batch.
+func failBatchBeforeSend(ctx context.Context, orgID string, payroll *models.Payroll) error {
+	return models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
+		if err := models.TransitionStatus(tx, payroll, models.PayrollProcessing, models.PayrollFailed); err != nil {
+			return err
+		}
+		return tx.Model(&models.PayrollItem{}).
+			Where("payroll_id = ? AND status = ?", payroll.ID, models.PayrollProcessing).
+			Update("status", models.PayrollPending).Error
+	})
 }
 
 // finalizePayroll resolves a batch that will never receive another webhook: it

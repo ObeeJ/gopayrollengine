@@ -20,7 +20,7 @@ func (h *PayrollHandler) CreatePayroll(c *gin.Context) {
 		Period string `json:"period" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		respondBindError(c, err)
 		return
 	}
 

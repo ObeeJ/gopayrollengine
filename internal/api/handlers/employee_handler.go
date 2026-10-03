@@ -51,7 +51,7 @@ func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 		HourlyRateKobo money.Kobo `json:"hourly_rate_kobo"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		respondBindError(c, err)
 		return
 	}
 	if req.WageType == "" {
@@ -198,7 +198,7 @@ func (h *EmployeeHandler) TerminateEmployee(c *gin.Context) {
 		Reason string `json:"reason" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		respondBindError(c, err)
 		return
 	}
 
@@ -223,18 +223,18 @@ func (h *EmployeeHandler) TerminateEmployee(c *gin.Context) {
 // alternative to a fourth advance rather than another draw against wages.
 func (h *EmployeeHandler) IssueHardshipGrant(c *gin.Context) {
 	var req struct {
-		Amount money.Kobo `json:"amount" binding:"required"`
-		Reason string     `json:"reason" binding:"required"`
+		Amount *money.Kobo `json:"amount" binding:"required"`
+		Reason string      `json:"reason" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		respondBindError(c, err)
 		return
 	}
 
 	orgID := middleware.OrgID(c)
 	employeeID := c.Param("id")
 
-	grant, err := h.ewa.IssueHardshipGrant(c.Request.Context(), orgID, employeeID, req.Amount, req.Reason, c.ClientIP())
+	grant, err := h.ewa.IssueHardshipGrant(c.Request.Context(), orgID, employeeID, *req.Amount, req.Reason, c.ClientIP())
 	if err != nil {
 		if errors.Is(err, services.ErrInvalidHardshipGrant) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

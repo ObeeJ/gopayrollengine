@@ -16,7 +16,8 @@ type AnalyticsHandler struct {
 func (h *AnalyticsHandler) GetPredictiveAnalytics(c *gin.Context) {
 	result, err := h.Service.GetPredictiveCashFlow(c.Request.Context(), middleware.OrgID(c))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		middleware.Logger.Error("predictive analytics failed", "org_id", middleware.OrgID(c), "error", err.Error())
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build the forecast"})
 		return
 	}
 	c.JSON(http.StatusOK, result)

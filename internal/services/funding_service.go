@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 
 	"go-payroll-engine/internal/integrations/monnify"
@@ -71,7 +72,9 @@ func (s *FundingService) ProvisionAccount(ctx context.Context, orgID, contactEma
 			return err
 		}
 		if !resp.RequestSuccessful || len(resp.ResponseBody.Accounts) == 0 {
-			return ErrFundingAccountProviderRejected
+			// The provider's own message goes in the wrapped error, for the
+			// log; handlers must not echo it to a client.
+			return fmt.Errorf("%w: %s", ErrFundingAccountProviderRejected, resp.ResponseMessage)
 		}
 		acc := resp.ResponseBody.Accounts[0]
 

@@ -47,7 +47,7 @@ func (h *PayrollPolicyHandler) UpdatePayrollPolicy(c *gin.Context) {
 		HolidayShiftMultiplierBps       *int `json:"holiday_shift_multiplier_bps"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		respondBindError(c, err)
 		return
 	}
 

@@ -239,3 +239,18 @@ jobs:
           cosign sign --yes payroll-app:${{ github.sha }} || true
           cosign attest --yes --predicate sbom.spdx.json \
             --type spdxjson payroll-app:${{ github.sha }} || true
+
+  # ---------------------------------------------------------------------
+  # Deployment smoke: the real compose stack (distroless images, TLS proxy,
+  # restricted DB role, migrations on startup, Prometheus scrape credential).
+  # Runs with MOCK_MODE, so it proves the plumbing, not the payment rails.
+  # ---------------------------------------------------------------------
+  compose-smoke:
+    name: Compose stack smoke test
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Bring the stack up and drive it through the TLS proxy
+        run: scripts/e2e/compose_smoke.sh

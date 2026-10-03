@@ -1093,15 +1093,8 @@ def phase_d2c(ctx):
     bayo.call("POST", f"{base}/authorize-debit", body={"consent": True}, expect=200,
               label="authorises repayment by direct debit")
 
-    r = bayo.call("GET", "/api/v1/worker/wages", expect=200, label="opens the app")
-    r = bayo.call("POST", "/api/v1/worker/advances", body={"amount": 5_000_00}, idem=True, expect=(202, 422),
-                  label="requests a ₦5,000 advance")
-    if r.status == 422 and r.get("decline_reason") == "no_income_history":
-        bayo.observe("D2C advances cannot be demonstrated end to end",
-                     "Bank linking works, but the mock bank provider returns no transactions, so every D2C "
-                     "advance is declined 'no_income_history'. There is no way to show a D2C advance, its "
-                     "repayment debit or the debit webhook succeeding until a real aggregator (Mono/Okra) is wired.",
-                     "medium")
+    bayo.call("GET", "/api/v1/worker/wages", expect=200, label="opens the app")
+    d2c_advance_flow(ctx, bayo)
     Monnify(ctx, "d2c", "Bank aggregator", "41.58.0.9").call(
         "POST", "/api/v1/webhooks/d2c-debit-collection", token=None, expect=404,
         body={"provider_reference": "mock-debit-unknown", "status": "successful"},
@@ -1112,6 +1105,67 @@ def phase_d2c(ctx):
 
     bayo2 = ctx.actor("d2c", "Bayo (next day, new phone session)", "197.210.5.6")
     worker_login(ctx, bayo2, S["bayo_phone"])
+
+
+def d2c_advance_flow(ctx, bayo):
+    """A self-employed worker draws an advance against income observed in his own bank
+    account, is paid out, and repays by direct debit when his predicted payday arrives."""
+    amount = 5_000_00
+    r = bayo.call("POST", "/api/v1/worker/advances", body={"amount": amount, "reason": "restock fabric"},
+                  idem=True, expect=202, label=f"requests a {ngn(amount)} advance, backed by his observed salary credits")
+    require(r.status == 202 and r.get("id"), "D2C advance was not approved: " + short(r.text))
+    adv_id = r.get("id")
+    bayo.check("the advance is approved", r.get("status") == "approved", short(r.text))
+
+    def submitted():
+        lr = bayo.call("GET", "/api/v1/worker/advances")
+        return next((a for a in (lr.get("data") or []) if a.get("id") == adv_id and a.get("provider_reference")), None)
+    require(wait_until(submitted, 15), "the D2C advance payout was never sent to the bank")
+    Monnify(ctx, "monnify", "Monnify", "41.58.0.10").disbursement(
+        "DISBURSEMENT_SUCCESSFUL", adv_id, amount, "confirms Bayo's advance landed")
+    r = bayo.call("GET", "/api/v1/worker/advances", expect=200, label="checks advance history")
+    a = next((x for x in (r.get("data") or []) if x.get("id") == adv_id), None)
+    bayo.check("the advance shows as disbursed", a and a.get("status") == "disbursed", short(r.text))
+
+    # Repayment: the daily sweep re-predicts his payday from his bank history and debits his
+    # mandate once it has arrived. D2C_SWEEP_AS_OF (honoured only under MOCK_MODE) skips the wait.
+    if not ctx.args.binary:
+        return
+    def run_sweep(as_of):
+        env = {**os.environ, "APP_MODE": "collect-d2c-debits", "D2C_SWEEP_AS_OF": as_of}
+        return subprocess.run([ctx.args.binary], env=env, capture_output=True, text=True, timeout=120)
+    today = date.today()
+    p = run_sweep(today.isoformat())
+    n = ctx.sql(f"SELECT count(*) FROM d2c_debit_collections WHERE advance_id = {sql_literal(adv_id)}")
+    ctx.report.check("d2c", "the sweep does not debit before his predicted payday", p.returncode == 0 and n == "0",
+                     f"exit {p.returncode}, collections={n}: {short((p.stdout + p.stderr)[-200:])}")
+    p = run_sweep((today + timedelta(days=25)).isoformat())
+    ctx.report.check("d2c", "the sweep exits cleanly once his payday has arrived", p.returncode == 0,
+                     short((p.stdout + p.stderr)[-300:]))
+    row = ctx.sql("SELECT provider_reference || '|' || status FROM d2c_debit_collections "
+                  f"WHERE advance_id = {sql_literal(adv_id)} ORDER BY created_at DESC LIMIT 1")
+    ref, _, status = row.partition("|")
+    ctx.report.check("d2c", "a repayment debit was submitted and is pending confirmation",
+                     bool(ref) and status == "pending", row)
+    require(ref, "no D2C collection was created")
+    p = run_sweep((today + timedelta(days=25)).isoformat())
+    n = ctx.sql(f"SELECT count(*) FROM d2c_debit_collections WHERE advance_id = {sql_literal(adv_id)}")
+    ctx.report.check("d2c", "a second sweep does not debit him twice while one is in flight",
+                     p.returncode == 0 and n == "1", f"collections={n}")
+
+    agg = Monnify(ctx, "d2c", "Bank aggregator", "41.58.0.9")
+    agg.call("POST", "/api/v1/webhooks/d2c-debit-collection", token=None, expect=200,
+             body={"provider_reference": ref, "status": "successful"},
+             label="aggregator confirms the repayment debit went through")
+    agg.call("POST", "/api/v1/webhooks/d2c-debit-collection", token=None, expect=200,
+             body={"provider_reference": ref, "status": "failed", "reason": "late contradictory callback"},
+             label="a late contradictory callback is acknowledged and ignored")
+    r = bayo.call("GET", "/api/v1/worker/advances", expect=200, label="sees the advance repaid")
+    a = next((x for x in (r.get("data") or []) if x.get("id") == adv_id), None)
+    bayo.check("the advance is settled after the debit", a and a.get("status") == "settled", short(r.text))
+    final = ctx.sql(f"SELECT status FROM d2c_debit_collections WHERE provider_reference = {sql_literal(ref)}")
+    ctx.report.check("d2c", "the collection stayed successful despite the late 'failed' callback",
+                     final == "successful", final)
 
 
 def stuck_payout_flow(ctx, sani):
@@ -1337,7 +1391,7 @@ def summarise(ctx):
     print()
     print(paint("1", "═" * 78))
     print(paint("1", f" RESULT: {passed} passed, {len(failed)} failed, {len(gaps)} design gaps, "
-                     f"{len(rep.observations)} observations"))
+                     f"{len(rep.observations)} observations, {len(rep.aborted)} ABORTED PHASES"))
     print(paint("1", "═" * 78))
 
     personas = {}

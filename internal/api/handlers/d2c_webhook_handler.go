@@ -30,7 +30,7 @@ type D2CDebitWebhookPayload struct {
 func (h *WebhookHandler) HandleD2CDebitWebhook(c *gin.Context) {
 	var payload D2CDebitWebhookPayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		respondBindError(c, err)
 		return
 	}
 

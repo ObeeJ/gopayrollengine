@@ -33,7 +33,7 @@ func (h *TimeEntryHandler) SubmitTimeEntry(c *gin.Context) {
 		Note          string                    `json:"note"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		respondBindError(c, err)
 		return
 	}
 	workDate, err := time.ParseInLocation("2006-01-02", req.WorkDate, time.UTC)
@@ -119,7 +119,7 @@ func (h *TimeEntryHandler) RejectTimeEntry(c *gin.Context) {
 		Reason string `json:"reason" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		respondBindError(c, err)
 		return
 	}
 

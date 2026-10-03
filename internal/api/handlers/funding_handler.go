@@ -28,7 +28,7 @@ func (h *FundingHandler) ProvisionFundingAccount(c *gin.Context) {
 		ContactEmail string `json:"contact_email" binding:"required,email"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		respondBindError(c, err)
 		return
 	}
 
@@ -36,7 +36,9 @@ func (h *FundingHandler) ProvisionFundingAccount(c *gin.Context) {
 	account, err := h.svc.ProvisionAccount(c.Request.Context(), orgID, req.ContactEmail)
 	if err != nil {
 		if errors.Is(err, services.ErrFundingAccountProviderRejected) {
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			// err carries the provider's own message: log it, never return it.
+			middleware.Logger.Error("funding account rejected by provider", "org_id", orgID, "error", err.Error())
+			c.JSON(http.StatusBadGateway, gin.H{"error": "the payment provider could not open the account; try again shortly"})
 			return
 		}
 		middleware.Logger.Error("funding account provisioning failed", "org_id", orgID, "error", err.Error())

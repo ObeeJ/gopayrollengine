@@ -86,11 +86,11 @@ func (h *AdvanceHandler) GetEarnedWages(c *gin.Context) {
 // cap and a concurrent request cannot race past one.
 func (h *AdvanceHandler) RequestAdvance(c *gin.Context) {
 	var req struct {
-		Amount money.Kobo `json:"amount" binding:"required"`
-		Reason string     `json:"reason"`
+		Amount *money.Kobo `json:"amount" binding:"required"`
+		Reason string      `json:"reason"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		respondBindError(c, err)
 		return
 	}
 	if !req.Amount.IsPositive() {
@@ -102,7 +102,7 @@ func (h *AdvanceHandler) RequestAdvance(c *gin.Context) {
 	orgID := middleware.OrgID(c)
 
 	advance, el, err := h.ewa.RequestAdvance(
-		c.Request.Context(), orgID, employeeID, req.Amount,
+		c.Request.Context(), orgID, employeeID, *req.Amount,
 		c.GetHeader("Idempotency-Key"), c.ClientIP(),
 	)
 
@@ -149,11 +149,14 @@ func (h *AdvanceHandler) RequestAdvance(c *gin.Context) {
 // Raising it is immediate; lowering it is rate-limited by the org's cooling-off
 // policy so it cannot be dropped in the moment of temptation.
 func (h *AdvanceHandler) SetProtectedPayday(c *gin.Context) {
+	// A pointer, so "required" means "present". On a plain money.Kobo, gin's
+	// "required" treats the zero value as missing and rejected 0, which is
+	// the amount that means "remove my floor".
 	var req struct {
-		Amount money.Kobo `json:"amount" binding:"required"`
+		Amount *money.Kobo `json:"amount" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		respondBindError(c, err)
 		return
 	}
 	if req.Amount.IsNegative() {
@@ -164,7 +167,7 @@ func (h *AdvanceHandler) SetProtectedPayday(c *gin.Context) {
 	employeeID := middleware.EmployeeID(c)
 	orgID := middleware.OrgID(c)
 
-	pref, err := h.ewa.SetProtectedPayday(c.Request.Context(), orgID, employeeID, req.Amount, time.Now())
+	pref, err := h.ewa.SetProtectedPayday(c.Request.Context(), orgID, employeeID, *req.Amount, time.Now())
 	if err != nil {
 		if errors.Is(err, services.ErrFloorLoweringRateLimited) {
 			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
@@ -194,7 +197,7 @@ func (h *AdvanceHandler) SetSavingsPreference(c *gin.Context) {
 		Amount  int64              `json:"amount"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		respondBindError(c, err)
 		return
 	}
 
@@ -274,7 +277,7 @@ func (h *AdvanceHandler) AddBill(c *gin.Context) {
 		DueDay int        `json:"due_day"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		respondBindError(c, err)
 		return
 	}
 

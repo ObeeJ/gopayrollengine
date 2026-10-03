@@ -81,7 +81,7 @@ func (h *D2CBankLinkHandler) CompleteLink(c *gin.Context) {
 		Consent       bool   `json:"consent" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		respondBindError(c, err)
 		return
 	}
 
@@ -143,7 +143,7 @@ func (h *D2CBankLinkHandler) AuthorizeDebit(c *gin.Context) {
 		Consent bool `json:"consent" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		respondBindError(c, err)
 		return
 	}
 

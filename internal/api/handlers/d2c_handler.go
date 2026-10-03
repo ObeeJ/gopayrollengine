@@ -76,7 +76,7 @@ func (h *D2CHandler) Signup(c *gin.Context) {
 		AcceptedDisclosure bool `json:"accepted_disclosure" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		respondBindError(c, err)
 		return
 	}
 

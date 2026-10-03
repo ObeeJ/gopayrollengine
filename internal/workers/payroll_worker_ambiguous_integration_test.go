@@ -63,4 +63,11 @@ func TestProcessPayrollTask_AmbiguousOutcomeIsNotRetried(t *testing.T) {
 	assert.Equal(t, models.PayrollProcessing, p.Status, "left for the webhooks to resolve, not failed")
 	assert.Equal(t, n, p.PendingCount)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&batchCalls))
+
+	// The batch may well have been accepted, so its callbacks must still be
+	// able to settle the items: that needs them 'processing', not 'pending'.
+	for _, it := range itemsFor(t, payrollID) {
+		assert.Equal(t, models.PayrollProcessing, it.Status,
+			"item %s must stay processing so a late callback can settle it", it.ID)
+	}
 }

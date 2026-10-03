@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"go-payroll-engine/internal/api/middleware"
 	"go-payroll-engine/internal/models"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 
 type ConsentHandler struct{}
 
+var errConsentEmployeeNotFound = errors.New("consent: employee not found in this organization")
+
 // RecordConsent — POST /api/v1/consent; NDPR Art. 26, consent + audit commit atomically.
 func (h *ConsentHandler) RecordConsent(c *gin.Context) {
 	var req struct {
@@ -21,7 +24,7 @@ func (h *ConsentHandler) RecordConsent(c *gin.Context) {
 		ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		respondBindError(c, err)
 		return
 	}
 
@@ -38,12 +41,35 @@ func (h *ConsentHandler) RecordConsent(c *gin.Context) {
 	}
 
 	if err := models.WithOrgScope(c.Request.Context(), orgID, func(tx *gorm.DB) error {
+		// employee_id comes from the request body, and the foreign key on
+		// consent_records is checked by Postgres with row-level security
+		// bypassed — so without this, naming another tenant's employee
+		// passes both the FK and RLS's WITH CHECK (which only inspects the
+		// caller's own organization_id). Prove ownership here. The employee
+		// need not be active: withdrawing consent after leaving is a
+		// legitimate NDPR request.
+		var owned int64
+		if err := tx.Model(&models.Employee{}).
+			Where("id = ? AND organization_id = ?", req.EmployeeID, orgID).
+			Count(&owned).Error; err != nil {
+			return err
+		}
+		if owned == 0 {
+			return errConsentEmployeeNotFound
+		}
 		if err := tx.Create(&record).Error; err != nil {
 			return err
 		}
 		return models.AppendAuditTx(tx, orgID, "ConsentRecord", record.ID, "consent_recorded",
 			"", req.ConsentType, c.ClientIP(), "")
 	}); err != nil {
+		// Another tenant's employee and a nonexistent one are deliberately
+		// indistinguishable: a different answer would let any employer probe
+		// which employee IDs exist in other companies.
+		if errors.Is(err, errConsentEmployeeNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "employee not found"})
+			return
+		}
 		middleware.Logger.Error("consent record + audit failed", "org_id", orgID, "error", err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record consent"})
 		return

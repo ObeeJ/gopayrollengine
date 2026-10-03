@@ -124,7 +124,7 @@ func computeRisk(balance, predicted money.Kobo) string {
 	return "Low"
 }
 
-// resolvePayrollStatus mirrors the reconciliation logic in webhook_handler.reconcilePayrollStatus.
+// resolvePayrollStatus mirrors the reconciliation logic in services.reconcilePayrollStatus.
 // Returns "" if items are still pending (no status change yet).
 func resolvePayrollStatus(items []models.PayrollItem) models.PayrollStatus {
 	var pending, failed int

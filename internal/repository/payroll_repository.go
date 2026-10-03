@@ -80,3 +80,38 @@ func (r *payrollRepo) FindItemByRef(ref string) (*models.PayrollItem, error) {
 	}
 	return &item, nil
 }
+
+func (r *payrollRepo) ListPaginated(orgID string, page, pageSize int) ([]models.Payroll, int64, error) {
+	var total int64
+	if err := r.db.Model(&models.Payroll{}).Where("organization_id = ?", orgID).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var payrolls []models.Payroll
+	err := r.db.Where("organization_id = ?", orgID).
+		Order("created_at DESC, id DESC").
+		Limit(pageSize).Offset((page - 1) * pageSize).
+		Find(&payrolls).Error
+	return payrolls, total, err
+}
+
+func (r *payrollRepo) ItemsForPayrolls(orgID string, payrollIDs []string) ([]models.PayrollItem, error) {
+	if len(payrollIDs) == 0 {
+		return nil, nil
+	}
+	var items []models.PayrollItem
+	err := r.db.Where("organization_id = ? AND payroll_id IN ?", orgID, payrollIDs).Find(&items).Error
+	return items, err
+}
+
+func (r *payrollRepo) FindItem(orgID, payrollID, itemID string) (*models.PayrollItem, error) {
+	var item models.PayrollItem
+	err := r.db.Where("organization_id = ? AND payroll_id = ? AND id = ?", orgID, payrollID, itemID).First(&item).Error
+	return &item, err
+}
+
+func (r *payrollRepo) FindItemsByStatus(orgID, payrollID string, status models.PayrollStatus) ([]models.PayrollItem, error) {
+	var items []models.PayrollItem
+	err := r.db.Where("organization_id = ? AND payroll_id = ? AND status = ?", orgID, payrollID, status).
+		Order("id").Find(&items).Error
+	return items, err
+}

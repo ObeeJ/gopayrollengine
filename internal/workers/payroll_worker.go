@@ -104,7 +104,9 @@ func (h *PayrollHandler) ProcessPayrollTask(ctx context.Context, t *asynq.Task) 
 		}
 		if res.RowsAffected == 0 {
 			// Already-processing or already-completed — duplicate task. Abort.
-			return fmt.Errorf("payroll %s not retryable: %w", payrollID, models.ErrStaleStatus)
+			// SkipRetry: a duplicate task (a double enqueue, or a resumed retry
+			// racing the first) will find the same thing on every attempt.
+			return fmt.Errorf("payroll %s not retryable: %w: %w", payrollID, models.ErrStaleStatus, asynq.SkipRetry)
 		}
 		payroll.Status = models.PayrollProcessing
 		payroll.PendingCount = len(sendable)
@@ -124,7 +126,7 @@ func (h *PayrollHandler) ProcessPayrollTask(ctx context.Context, t *asynq.Task) 
 			}
 			marked := tx.Model(&models.PayrollItem{}).
 				Where("id IN ? AND status = ?", sendableIDs, models.PayrollPending).
-				Update("status", models.PayrollProcessing)
+				Updates(map[string]interface{}{"status": models.PayrollProcessing, "sent_at": time.Now()})
 			if marked.Error != nil {
 				return fmt.Errorf("payroll %s: marking items processing failed: %w", payrollID, marked.Error)
 			}
@@ -193,8 +195,9 @@ func (h *PayrollHandler) ProcessPayrollTask(ctx context.Context, t *asynq.Task) 
 			AccountNumber: emp.AccountNumber.String(), // decrypt happens transparently via EncryptedString
 			BankCode:      emp.BankCode.String(),
 			Narration:     fmt.Sprintf("Salary for %s", payroll.Period),
-			Reference:     item.ID,
-			CurrencyCode:  "NGN",
+			// A retry goes under a new reference (see ItemReference).
+			Reference:    item.ItemReference(),
+			CurrencyCode: "NGN",
 		})
 	}
 
@@ -256,7 +259,7 @@ func failBatchBeforeSend(ctx context.Context, orgID string, payroll *models.Payr
 		}
 		return tx.Model(&models.PayrollItem{}).
 			Where("payroll_id = ? AND status = ?", payroll.ID, models.PayrollProcessing).
-			Update("status", models.PayrollPending).Error
+			Updates(map[string]interface{}{"status": models.PayrollPending, "sent_at": nil}).Error
 	})
 }
 

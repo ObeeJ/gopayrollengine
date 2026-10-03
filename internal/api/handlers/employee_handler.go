@@ -9,7 +9,6 @@ import (
 	"go-payroll-engine/internal/workers"
 	"go-payroll-engine/pkg/money"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -160,14 +159,7 @@ func (h *EmployeeHandler) CreateEmployee(c *gin.Context) {
 
 // GetEmployees — paginated list scoped to the caller's org; RLS is the load-bearing fence.
 func (h *EmployeeHandler) GetEmployees(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	if page < 1 {
-		page = 1
-	}
-	if pageSize < 1 || pageSize > 100 {
-		pageSize = 20
-	}
+	page, pageSize := pageParams(c)
 
 	orgID := middleware.OrgID(c)
 	var (

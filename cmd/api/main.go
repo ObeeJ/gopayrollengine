@@ -47,6 +47,16 @@ func main() {
 
 	cfg := config.Load()
 
+	// How long a payout may be with the bank before its missing callback is
+	// treated as a problem (reported, and resolvable by an admin).
+	if raw := os.Getenv("PAYROLL_STUCK_AFTER"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d <= 0 {
+			log.Fatal("FATAL: PAYROLL_STUCK_AFTER must be a positive duration like 2h or 90m")
+		}
+		models.StuckAfter = d
+	}
+
 	models.InitEncryption() // must run before InitDB so the GORM serializer is ready
 	models.InitDB()
 	middleware.InitJWT() // loads JWT secret after env is confirmed present
@@ -127,6 +137,12 @@ func main() {
 
 func startAPI(port string) {
 	r := api.SetupRouter()
+
+	// Watches for payouts whose bank callback is overdue (see
+	// services.StuckPayoutScanner for why this lives in the API process).
+	scanCtx, stopScan := context.WithCancel(context.Background())
+	defer stopScan()
+	go services.NewStuckPayoutScanner(5 * time.Minute).Run(scanCtx)
 
 	srv := &http.Server{
 		Addr:         ":" + port,

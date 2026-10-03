@@ -134,18 +134,37 @@ func (p *Payroll) BeforeCreate(tx *gorm.DB) (err error) {
 
 // PayrollItem — one employee's slice; TransactionReference is the webhook's join key.
 type PayrollItem struct {
-	ID                   string         `gorm:"primaryKey" json:"id"`
-	OrganizationID       string         `gorm:"index;not null" json:"organization_id"`
-	PayrollID            string         `gorm:"index" json:"payroll_id"`
-	EmployeeID           string         `gorm:"index" json:"employee_id"`
-	EmployeeName         string         `json:"employee_name"`
-	Amount               money.Kobo     `gorm:"type:bigint;not null;default:0" json:"amount"`
-	Status               PayrollStatus  `gorm:"default:pending" json:"status"`
-	TransactionReference string         `json:"transaction_reference"`
-	ErrorMessage         string         `json:"error_message"`
-	CreatedAt            time.Time      `json:"created_at"`
-	UpdatedAt            time.Time      `json:"updated_at"`
-	DeletedAt            gorm.DeletedAt `gorm:"index" json:"-"`
+	ID                   string        `gorm:"primaryKey" json:"id"`
+	OrganizationID       string        `gorm:"index;not null" json:"organization_id"`
+	PayrollID            string        `gorm:"index" json:"payroll_id"`
+	EmployeeID           string        `gorm:"index" json:"employee_id"`
+	EmployeeName         string        `json:"employee_name"`
+	Amount               money.Kobo    `gorm:"type:bigint;not null;default:0" json:"amount"`
+	Status               PayrollStatus `gorm:"default:pending" json:"status"`
+	TransactionReference string        `json:"transaction_reference"`
+	ErrorMessage         string        `json:"error_message"`
+
+	// Attempt — which try at paying this item the bank is currently working
+	// on. See ItemReference: a retry is sent under a new reference.
+	Attempt int `gorm:"default:1" json:"attempt"`
+
+	// The breakdown behind Amount (the net). Nil on rows that predate
+	// migration 000034.
+	GrossKobo            *money.Kobo `gorm:"column:gross_kobo;type:bigint" json:"gross_kobo,omitempty"`
+	AdvancesDeductedKobo *money.Kobo `gorm:"column:advances_deducted_kobo;type:bigint" json:"advances_deducted_kobo,omitempty"`
+	SavingsKobo          *money.Kobo `gorm:"column:savings_kobo;type:bigint" json:"savings_kobo,omitempty"`
+
+	SentAt    *time.Time `json:"sent_at,omitempty"`
+	SettledAt *time.Time `json:"settled_at,omitempty"`
+
+	// Set only when an admin resolved a payout whose callback never arrived.
+	ResolvedBy         *string `json:"resolved_by,omitempty"`
+	ResolutionNote     *string `json:"resolution_note,omitempty"`
+	ResolutionEvidence *string `json:"resolution_evidence,omitempty"`
+
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 // BeforeCreate — ITEM- prefix so you can tell at a glance what kind of record you're looking at.

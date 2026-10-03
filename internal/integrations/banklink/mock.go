@@ -2,6 +2,7 @@ package banklink
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"go-payroll-engine/pkg/money"
@@ -38,8 +39,45 @@ type Mock struct {
 	// result — simulates ErrDebitUnavailable or similar.
 	InitiateDebitError error
 
+	// Demo (see NewDemoMock) makes the mock usable across processes and gives
+	// mock accounts an income history, so MOCK_MODE can show a D2C worker an
+	// advance, its repayment debit and the debit callback end to end.
+	Demo bool
+
 	mandates map[string]string // providerAccountRef -> mandateRef
 	debits   []DebitCall
+}
+
+const (
+	mockMandatePrefix = "mock-mandate-"
+	mockAccountPrefix = "mock-acct-"
+)
+
+// NewDemoMock is the MOCK_MODE wiring (routes.go and the collection sweep).
+// Unlike NewMock, which unit tests rely on for strict per-instance behaviour:
+//   - a mock account with no seeded history shows four monthly ₦250,000
+//     salary credits ending ten days ago (so a payday is predictable);
+//   - any mandate reference this mock could have issued is honoured, because
+//     the API process authorises the mandate and a separate sweep process
+//     debits it, and neither shares memory with the other.
+func NewDemoMock() *Mock {
+	m := NewMock()
+	m.Demo = true
+	return m
+}
+
+func (m *Mock) syntheticIncome() []Transaction {
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	out := make([]Transaction, 0, 4)
+	for i := 0; i < 4; i++ {
+		out = append(out, Transaction{
+			Date:      today.AddDate(0, 0, -10-30*i),
+			Amount:    money.FromNaira(250_000),
+			Direction: Credit,
+			Narration: "SALARY (demo)",
+		})
+	}
+	return out
 }
 
 // DebitCall records one InitiateDebit invocation, for tests that assert on
@@ -77,14 +115,17 @@ func (m *Mock) InitiateLink(ctx context.Context, reference string) (LinkSession,
 
 func (m *Mock) CompleteLink(ctx context.Context, callbackToken string) (LinkedAccount, error) {
 	return LinkedAccount{
-		ProviderAccountRef: "mock-acct-" + uuid.New().String()[:8],
+		ProviderAccountRef: mockAccountPrefix + uuid.New().String()[:8],
 		AccountName:        "Mock Test Account",
 		BankName:           "Mock Bank",
 	}, nil
 }
 
 func (m *Mock) GetTransactions(ctx context.Context, providerAccountRef string, since time.Time) ([]Transaction, error) {
-	all := m.Transactions[providerAccountRef]
+	all, seeded := m.Transactions[providerAccountRef]
+	if !seeded && m.Demo && strings.HasPrefix(providerAccountRef, mockAccountPrefix) {
+		all = m.syntheticIncome()
+	}
 	filtered := make([]Transaction, 0, len(all))
 	for _, tx := range all {
 		if !tx.Date.Before(since) {
@@ -95,7 +136,7 @@ func (m *Mock) GetTransactions(ctx context.Context, providerAccountRef string, s
 }
 
 func (m *Mock) AuthorizeDebitMandate(ctx context.Context, providerAccountRef string) (string, error) {
-	mandateRef := "mock-mandate-" + uuid.New().String()[:8]
+	mandateRef := mockMandatePrefix + uuid.New().String()[:8]
 	m.mandates[mandateRef] = providerAccountRef
 	return mandateRef, nil
 }
@@ -104,7 +145,9 @@ func (m *Mock) InitiateDebit(ctx context.Context, mandateRef string, amount mone
 	if m.InitiateDebitError != nil {
 		return DebitResult{}, m.InitiateDebitError
 	}
-	if _, ok := m.mandates[mandateRef]; !ok {
+	_, issuedHere := m.mandates[mandateRef]
+	issuedElsewhere := m.Demo && strings.HasPrefix(mandateRef, mockMandatePrefix)
+	if !issuedHere && !issuedElsewhere {
 		return DebitResult{}, ErrNoMandate
 	}
 	m.debits = append(m.debits, DebitCall{MandateRef: mandateRef, Amount: amount, Reference: reference})

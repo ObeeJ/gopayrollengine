@@ -69,7 +69,7 @@ func SetupRouter() *gin.Engine {
 	// with DeclineNoIncomeHistory rather than a fake prediction.
 	var d2cProvider banklink.DebitProvider
 	if os.Getenv("MOCK_MODE") == "true" {
-		d2cProvider = banklink.NewMock()
+		d2cProvider = banklink.NewDemoMock()
 		ewaService.D2CProvider = d2cProvider
 	}
 	empHandler := handlers.NewEmployeeHandler(empRepo, ewaService)

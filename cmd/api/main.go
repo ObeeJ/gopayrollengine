@@ -138,7 +138,18 @@ func main() {
 		if os.Getenv("MOCK_MODE") != "true" {
 			log.Fatal("collect-d2c-debits: no real banklink debit provider is wired yet — refusing to run outside MOCK_MODE")
 		}
-		results, err := services.SweepD2CCollections(context.Background(), time.Now(), banklink.NewMock())
+		// D2C_SWEEP_AS_OF (YYYY-MM-DD) pretends it is that day, so a demo can
+		// reach a predicted payday without waiting for it. Honoured only here,
+		// inside the MOCK_MODE guard above.
+		asOf := time.Now()
+		if raw := os.Getenv("D2C_SWEEP_AS_OF"); raw != "" {
+			d, perr := time.Parse("2006-01-02", raw)
+			if perr != nil {
+				log.Fatal("D2C_SWEEP_AS_OF must be YYYY-MM-DD")
+			}
+			asOf = d
+		}
+		results, err := services.SweepD2CCollections(context.Background(), asOf, banklink.NewDemoMock())
 		if err != nil {
 			log.Fatal("D2C debit collection sweep failed:", err)
 		}

@@ -341,6 +341,15 @@ lives in `config/scheduler-crontab`; see its own comments for the times
 chosen and for why `collect-d2c-debits` isn't scheduled yet (no live
 banklink aggregator to run it against outside `MOCK_MODE`).
 
+Under `MOCK_MODE` a D2C worker can be taken end to end: the demo bank provider
+invents four monthly ₦250,000 salary credits for a linked mock account (so a
+payday is predictable) and honours a mandate across processes. To reach a
+predicted payday without waiting, run the sweep as of a later day:
+`APP_MODE=collect-d2c-debits D2C_SWEEP_AS_OF=2026-11-12 ./payroll` (the override
+is ignored outside `MOCK_MODE`, which `cmd/api` refuses outside development/test).
+`scripts/e2e/run_live_e2e.sh` drives this: advance, payout, repayment debit,
+debit callback, settlement.
+
 ```bash
 # See what actually ran and when
 docker-compose logs -f scheduler

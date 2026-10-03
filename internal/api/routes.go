@@ -6,6 +6,7 @@ import (
 	"go-payroll-engine/internal/appenv"
 	"go-payroll-engine/internal/integrations/banklink"
 	"go-payroll-engine/internal/integrations/monnify"
+	"go-payroll-engine/internal/integrations/sms"
 	"go-payroll-engine/internal/models"
 	"go-payroll-engine/internal/repository"
 	"go-payroll-engine/internal/services"
@@ -54,9 +55,18 @@ func SetupRouter() *gin.Engine {
 	// answer 503 — refusing logins beats the previous behaviour of
 	// accepting any code for any phone number. Wire a real OTPSender here
 	// before launching the worker app.
+	// SMS: MOCK_MODE logs codes (development only); otherwise the configured
+	// gateway (TERMII_API_KEY + TERMII_SENDER_ID); otherwise nil, and worker
+	// login answers 503 instead of accepting anything.
 	var otpSender services.OTPSender
-	if os.Getenv("MOCK_MODE") == "true" {
-		otpSender = services.LogOTPSender{}
+	var textSender services.TextSender
+	switch gateway, gwErr := sms.FromEnv(); {
+	case os.Getenv("MOCK_MODE") == "true":
+		otpSender, textSender = services.LogOTPSender{}, services.LogTextSender{}
+	case gwErr == nil:
+		otpSender, textSender = gateway, gateway
+	default:
+		log.Println("WARNING: no SMS gateway configured — worker login is unavailable until TERMII_API_KEY and TERMII_SENDER_ID are set")
 	}
 	workerAuthHandler := handlers.NewWorkerAuthHandler(userRepo, empRepo, services.NewOTPService(workers.RDB, otpSender))
 	ewaService := services.NewEWAService()
@@ -73,6 +83,7 @@ func SetupRouter() *gin.Engine {
 		ewaService.D2CProvider = d2cProvider
 	}
 	empHandler := handlers.NewEmployeeHandler(empRepo, ewaService)
+	empHandler.SetNotifier(textSender)
 	payrollService := services.NewPayrollService(payrollRepo, empRepo)
 	payrollHandler := &handlers.PayrollHandler{Service: payrollService}
 	payslipHandler := handlers.NewPayslipHandler(payrollService)

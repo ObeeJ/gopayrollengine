@@ -26,6 +26,14 @@ type EmployeeHandler struct {
 }
 
 // NewEmployeeHandler — wires up the handler with its repository.
+// SetNotifier makes bank-detail and phone changes text the worker; nil disables it.
+func (h *EmployeeHandler) SetNotifier(n services.TextSender) {
+	if n == nil {
+		return
+	}
+	h.employees.Notifier = n
+}
+
 func NewEmployeeHandler(r repository.EmployeeRepository, ewa *services.EWAService) *EmployeeHandler {
 	return &EmployeeHandler{repo: r, employees: services.NewEmployeeService(), termination: services.NewEmployeeTerminationService(), ewa: ewa}
 }

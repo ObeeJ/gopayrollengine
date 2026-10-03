@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
+	"sync"
+	"time"
 
 	"go-payroll-engine/internal/models"
 	"go-payroll-engine/internal/validate"
@@ -48,11 +51,61 @@ type EmployeeUpdate struct {
 // IsEmpty reports whether the update names no field at all.
 func (u EmployeeUpdate) IsEmpty() bool { return u == EmployeeUpdate{} }
 
+// TextSender delivers a short text message to a phone (E.164).
+type TextSender interface {
+	SendText(ctx context.Context, phone, text string) error
+}
+
 // EmployeeService owns changes to an existing employee record.
-type EmployeeService struct{}
+type EmployeeService struct {
+	// Notifier, when set, texts the worker after a change to where their pay
+	// goes. Best effort: a failed text never fails or rolls back the update.
+	Notifier TextSender
+	pending  sync.WaitGroup
+}
 
 // NewEmployeeService constructs the service.
 func NewEmployeeService() *EmployeeService { return &EmployeeService{} }
+
+// WaitNotifications blocks until in-flight notification texts finish (tests, shutdown).
+func (s *EmployeeService) WaitNotifications() { s.pending.Wait() }
+
+// LogTextSender prints texts to the process log. Development/test only —
+// routes.go wires it solely under MOCK_MODE.
+type LogTextSender struct{}
+
+func (LogTextSender) SendText(_ context.Context, phone, text string) error {
+	log.Printf("MOCK SMS to %s: %s", phone, text)
+	return nil
+}
+
+type textNotice struct{ phone, body string }
+
+// notify sends after the update has committed, without holding the request.
+func (s *EmployeeService) notify(notices []textNotice) {
+	if s.Notifier == nil {
+		return
+	}
+	for _, n := range notices {
+		s.pending.Add(1)
+		go func(n textNotice) {
+			defer s.pending.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if err := s.Notifier.SendText(ctx, n.phone, n.body); err != nil {
+				// The phone is personal data: log it masked.
+				log.Printf("employee change notice not delivered to %s: %v", models.MaskPII(n.phone), err)
+			}
+		}(n)
+	}
+}
+
+func last4(s string) string {
+	if len(s) <= 4 {
+		return s
+	}
+	return s[len(s)-4:]
+}
 
 // fieldChange is one changed field, described for the audit log.
 type fieldChange struct{ field, before, after string }
@@ -76,7 +129,9 @@ func (s *EmployeeService) UpdateEmployee(
 	}
 
 	var emp models.Employee
+	var notices []textNotice
 	err := models.WithOrgScope(ctx, orgID, func(tx *gorm.DB) error {
+		notices = nil // a retried transaction must not double-notify
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			First(&emp, "id = ? AND organization_id = ?", employeeID, orgID).Error; err != nil {
 			return err
@@ -127,6 +182,7 @@ func (s *EmployeeService) UpdateEmployee(
 		if upd.BankCode != nil {
 			newBank = strings.TrimSpace(*upd.BankCode)
 		}
+		bankChanged := false
 		if upd.AccountNumber != nil || upd.BankCode != nil {
 			if msg := validate.BankDetails(currency, newAcct, newBank); msg != "" {
 				// BankDetails words its message as "<field> <problem>".
@@ -134,10 +190,12 @@ func (s *EmployeeService) UpdateEmployee(
 				return invalidEmployeeUpdate(field, problem)
 			}
 			if newAcct != emp.AccountNumber.String() {
+				bankChanged = true
 				change("account_number", emp.AccountNumber.String(), newAcct, true)
 				emp.AccountNumber = models.EncryptedString(newAcct)
 			}
 			if newBank != emp.BankCode.String() {
+				bankChanged = true
 				change("bank_code", emp.BankCode.String(), newBank, true)
 				emp.BankCode = models.EncryptedString(newBank)
 			}
@@ -168,6 +226,7 @@ func (s *EmployeeService) UpdateEmployee(
 			}
 		}
 
+		phoneChangedFrom := ""
 		if upd.Phone != nil {
 			phone := strings.TrimSpace(*upd.Phone)
 			if !validate.Phone(phone) {
@@ -186,7 +245,25 @@ func (s *EmployeeService) UpdateEmployee(
 				if err := tx.Model(&models.User{}).Where("id = ?", login.ID).Update("phone", phone).Error; err != nil {
 					return err
 				}
+				phoneChangedFrom = login.Phone
 				change("phone", login.Phone, phone, true)
+			}
+		}
+
+		if s.Notifier != nil && (bankChanged || phoneChangedFrom != "") {
+			var orgName string
+			_ = tx.Model(&models.Organization{}).Where("id = ?", orgID).Select("name").Scan(&orgName).Error
+			if bankChanged {
+				var login models.User
+				if err := tx.Where("employee_id = ?", emp.ID).First(&login).Error; err == nil && login.Phone != "" {
+					notices = append(notices, textNotice{login.Phone, fmt.Sprintf(
+						"Your bank details on %s payroll were changed (account ending %s). If this was not you, contact your employer now.",
+						orgName, last4(emp.AccountNumber.String()))})
+				}
+			}
+			if phoneChangedFrom != "" {
+				notices = append(notices, textNotice{phoneChangedFrom, fmt.Sprintf(
+					"The phone number on your %s payroll profile was changed. If this was not you, contact your employer now.", orgName)})
 			}
 		}
 
@@ -211,5 +288,6 @@ func (s *EmployeeService) UpdateEmployee(
 	if err != nil {
 		return nil, fmt.Errorf("update employee %s: %w", employeeID, err)
 	}
+	s.notify(notices)
 	return &emp, nil
 }

@@ -234,6 +234,20 @@ class Ctx:
         return None
 
 
+    def read_sms(self, phone, offset, timeout=6.0):
+        """The text the (mock) SMS gateway was asked to send to this phone."""
+        pattern = re.compile(r"MOCK SMS to " + re.escape(phone) + r": (.+)")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with open(self.args.api_log, "r", errors="replace") as f:
+                f.seek(offset)
+                found = pattern.findall(f.read())
+            if found:
+                return found[-1]
+            time.sleep(0.2)
+        return None
+
+
 class Resp:
     def __init__(self, r, ms):
         self.status = r.status_code
@@ -876,9 +890,18 @@ def fix_bank_details(ctx, ada, emeka_id):
              label="a 5-digit account number is refused")
     ada.call("PATCH", path, route=route, body={"hourly_rate_kobo": 100000}, expect=400,
              label="an hourly rate on a salaried employee is refused")
+    phone = rand_phone()
+    ada.call("PATCH", path, route=route, body={"phone": phone}, expect=200,
+             label="registers Emeka's phone so he can log in and be told about changes")
     new_account = rand_nuban()
+    off = ctx.log_offset()
     r = ada.call("PATCH", path, route=route, body={"account_number": new_account, "bank_code": "033"},
                  expect=200, label="corrects Emeka's closed bank account")
+    text = ctx.read_sms(phone, off)
+    ada.check("Emeka is texted that his bank details changed", bool(text), "no 'MOCK SMS' line for his phone")
+    if text:
+        ada.check("the text names the account by its last four digits only",
+                  new_account[-4:] in text and new_account not in text, text)
     ada.check("the response masks the new account number",
               r.get("account_number") == "****" + new_account[-4:] and new_account not in r.text, short(r.text))
 

@@ -381,7 +381,7 @@ APP_MODE=create-org ORG_NAME="Swift Logistics Ltd" ADMIN_EMAIL=ada@swift.example
 | `PATCH` | `/api/v1/users/:id` | Admin: change role or `is_active`. Deactivation revokes live tokens immediately; an org can never be left without an active admin |
 | `POST` | `/api/v1/users/:id/reset-password` | Admin: issue a new one-time password |
 | `POST` | `/api/v1/auth/refresh` | Refresh an employer token — only while the org is active, max 24h from login |
-| `POST` | `/api/v1/worker/auth/otp` | Send a worker a 6-digit login code by SMS (503 until an SMS provider is wired) |
+| `POST` | `/api/v1/worker/auth/otp` | Send a worker a 6-digit login code by SMS (503 unless an SMS gateway is configured: `TERMII_API_KEY` + `TERMII_SENDER_ID`) |
 | `POST` | `/api/v1/worker/auth/login` | Worker login — phone + OTP; codes are single-use, 5 min, 5 guesses |
 | `GET` | `/api/v1/worker/payslips` | The worker's own payroll lines, newest first: period, gross, advances recovered, savings, net, and whether the money has landed |
 
@@ -391,7 +391,7 @@ APP_MODE=create-org ORG_NAME="Swift Logistics Ltd" ADMIN_EMAIL=ada@swift.example
 |:---|:---|:---|
 | `POST` | `/api/v1/employees/` | Create employee — BVN verified, consent recorded, PII encrypted; optional `phone` (E.164) creates the worker's app login |
 | `GET` | `/api/v1/employees/` | List employees (paginated; bank details masked) |
-| `PATCH` | `/api/v1/employees/:id` | Admin: change name, email, phone (the worker's login), bank details, salary or hourly rate. Unknown fields are refused; changes are audited with PII masked; a corrected account applies to the next payment, including a retry |
+| `PATCH` | `/api/v1/employees/:id` | Admin: change name, email, phone (the worker's login), bank details, salary or hourly rate. Unknown fields are refused; changes are audited with PII masked; a corrected account applies to the next payment, including a retry. Changing bank details or the phone texts the worker (best effort) |
 
 **Payroll**
 

@@ -61,3 +61,21 @@ func Email(e string) bool {
 	addr, err := mail.ParseAddress(e)
 	return err == nil && addr.Address == e
 }
+
+// Password rules for employer logins: long enough to resist guessing, and
+// within bcrypt's 72-byte input limit (longer input is silently truncated).
+const (
+	PasswordMinLen = 12
+	PasswordMaxLen = 72
+)
+
+// Password returns "" when the password is acceptable, else a reason safe to show.
+func Password(p string) string {
+	switch {
+	case len(p) < PasswordMinLen:
+		return "password must be at least 12 characters"
+	case len(p) > PasswordMaxLen:
+		return "password must be at most 72 bytes"
+	}
+	return ""
+}

@@ -105,7 +105,7 @@ func (h *TimeEntryHandler) ApproveTimeEntry(c *gin.Context) {
 	orgID := middleware.OrgID(c)
 	entryID := c.Param("id")
 
-	entry, err := h.svc.ApproveTimeEntry(c.Request.Context(), orgID, entryID, middleware.Role(c), c.ClientIP())
+	entry, err := h.svc.ApproveTimeEntry(c.Request.Context(), orgID, entryID, middleware.ActorName(c), c.ClientIP())
 	if err != nil {
 		h.handleResolveError(c, orgID, entryID, err)
 		return
@@ -126,7 +126,7 @@ func (h *TimeEntryHandler) RejectTimeEntry(c *gin.Context) {
 	orgID := middleware.OrgID(c)
 	entryID := c.Param("id")
 
-	entry, err := h.svc.RejectTimeEntry(c.Request.Context(), orgID, entryID, middleware.Role(c), c.ClientIP(), req.Reason)
+	entry, err := h.svc.RejectTimeEntry(c.Request.Context(), orgID, entryID, middleware.ActorName(c), c.ClientIP(), req.Reason)
 	if err != nil {
 		h.handleResolveError(c, orgID, entryID, err)
 		return
